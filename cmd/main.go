@@ -53,7 +53,7 @@ func run() error {
 	icp := interceptor.New(traceStore, dbStore, m)
 
 	// ── OTLP receiver + downstream forwarder ──────────────────────────
-	recv, err := receiver.New(icp, cfg.collectorEndpoint)
+	recv, err := receiver.Dial(icp, cfg.collectorEndpoint)
 	if err != nil {
 		return fmt.Errorf("init receiver: %w", err)
 	}
