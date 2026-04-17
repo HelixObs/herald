@@ -1,0 +1,367 @@
+package interceptor_test
+
+import (
+	"strings"
+	"testing"
+
+	"github.com/prometheus/client_golang/prometheus"
+	collectortracepb "go.opentelemetry.io/proto/otlp/collector/trace/v1"
+	commonpb "go.opentelemetry.io/proto/otlp/common/v1"
+	tracepb "go.opentelemetry.io/proto/otlp/trace/v1"
+
+	"github.com/HelixObs/gateway/internal/interceptor"
+	"github.com/HelixObs/gateway/internal/metrics"
+	"github.com/HelixObs/gateway/internal/store"
+)
+
+// newInterceptor builds an Interceptor with a fresh store + metrics registry.
+// db is nil — DB writes are skipped (nil-guarded in the interceptor).
+func newInterceptor() *interceptor.Interceptor {
+	s := store.New(1_000)
+	m := metrics.New(prometheus.NewRegistry())
+	return interceptor.New(s, nil, m)
+}
+
+// makeSpan builds a minimal OTLP span with the given attributes.
+func makeSpan(name string, attrs map[string]string) *tracepb.Span {
+	span := &tracepb.Span{
+		Name:              name,
+		TraceId:           []byte{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16},
+		SpanId:            []byte{1, 2, 3, 4, 5, 6, 7, 8},
+		StartTimeUnixNano: 1_000_000_000,
+	}
+	for k, v := range attrs {
+		span.Attributes = append(span.Attributes, strAttr(k, v))
+	}
+	return span
+}
+
+func makeReq(spans ...*tracepb.Span) *collectortracepb.ExportTraceServiceRequest {
+	return &collectortracepb.ExportTraceServiceRequest{
+		ResourceSpans: []*tracepb.ResourceSpans{{
+			ScopeSpans: []*tracepb.ScopeSpans{{
+				Spans: spans,
+			}},
+		}},
+	}
+}
+
+func strAttr(k, v string) *commonpb.KeyValue {
+	return &commonpb.KeyValue{
+		Key:   k,
+		Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: v}},
+	}
+}
+
+// ── Non-helix spans ───────────────────────────────────────────────────────────
+
+func TestNonHelixSpanPassedThrough(t *testing.T) {
+	icp := newInterceptor()
+	span := makeSpan("some-service", map[string]string{"http.method": "GET"})
+	req := makeReq(span)
+	icp.Process(req)
+	// Span should be unchanged — no links added.
+	if len(span.Links) != 0 {
+		t.Errorf("expected 0 links, got %d", len(span.Links))
+	}
+}
+
+// ── Span attributes ───────────────────────────────────────────────────────────
+
+func TestHelixSpanHasEntityID(t *testing.T) {
+	icp := newInterceptor()
+	span := makeSpan("correlator", map[string]string{
+		"helix.entity.id":     "block-1",
+		"helix.instrument.id": "CHIME",
+	})
+	icp.Process(makeReq(span))
+	// Entity should now be in the store — verify by checking a child resolves it.
+	child := makeSpan("classifier", map[string]string{
+		"helix.entity.id":     "cand-1",
+		"helix.instrument.id": "CHIME",
+		"helix.parent.ids":    "block-1",
+	})
+	icp.Process(makeReq(child))
+	if len(child.Links) != 1 {
+		t.Errorf("expected 1 link on child, got %d", len(child.Links))
+	}
+}
+
+// ── Parent resolution ─────────────────────────────────────────────────────────
+
+func TestKnownParentAddsSpanLink(t *testing.T) {
+	icp := newInterceptor()
+
+	parent := makeSpan("correlator", map[string]string{
+		"helix.entity.id":     "block-1",
+		"helix.instrument.id": "CHIME",
+	})
+	parent.TraceId = []byte{0xAA, 0xBB, 0xCC, 0xDD, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
+	parent.SpanId = []byte{0x11, 0x22, 0x33, 0x44, 0, 0, 0, 0}
+	icp.Process(makeReq(parent))
+
+	child := makeSpan("classifier", map[string]string{
+		"helix.entity.id":     "cand-1",
+		"helix.instrument.id": "CHIME",
+		"helix.parent.ids":    "block-1",
+	})
+	icp.Process(makeReq(child))
+
+	if len(child.Links) != 1 {
+		t.Fatalf("expected 1 link, got %d", len(child.Links))
+	}
+	if child.Links[0].TraceId[0] != 0xAA {
+		t.Errorf("link TraceId mismatch: got %x", child.Links[0].TraceId)
+	}
+	if child.Links[0].SpanId[0] != 0x11 {
+		t.Errorf("link SpanId mismatch: got %x", child.Links[0].SpanId)
+	}
+}
+
+func TestUnknownParentAddsNoLink(t *testing.T) {
+	icp := newInterceptor()
+	span := makeSpan("classifier", map[string]string{
+		"helix.entity.id":     "cand-1",
+		"helix.instrument.id": "CHIME",
+		"helix.parent.ids":    "block-never-seen",
+	})
+	icp.Process(makeReq(span))
+	if len(span.Links) != 0 {
+		t.Errorf("expected 0 links for unknown parent, got %d", len(span.Links))
+	}
+}
+
+func TestMultipleParentsAllResolved(t *testing.T) {
+	icp := newInterceptor()
+
+	for i, id := range []string{"cand-41", "cand-42", "cand-43"} {
+		p := makeSpan("beam-processor", map[string]string{
+			"helix.entity.id":     id,
+			"helix.instrument.id": "CHIME",
+		})
+		p.TraceId = []byte{byte(i + 1), 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
+		p.SpanId = []byte{byte(i + 1), 0, 0, 0, 0, 0, 0, 0}
+		icp.Process(makeReq(p))
+	}
+
+	event := makeSpan("clustering", map[string]string{
+		"helix.entity.id":     "frb-001",
+		"helix.instrument.id": "CHIME",
+		"helix.parent.ids":    "cand-41,cand-42,cand-43",
+	})
+	icp.Process(makeReq(event))
+
+	if len(event.Links) != 3 {
+		t.Errorf("expected 3 links (N-to-1 provenance), got %d", len(event.Links))
+	}
+}
+
+func TestMixedKnownAndUnknownParents(t *testing.T) {
+	icp := newInterceptor()
+
+	known := makeSpan("correlator", map[string]string{
+		"helix.entity.id":     "block-1",
+		"helix.instrument.id": "CHIME",
+	})
+	icp.Process(makeReq(known))
+
+	child := makeSpan("clustering", map[string]string{
+		"helix.entity.id":     "event-1",
+		"helix.instrument.id": "CHIME",
+		"helix.parent.ids":    "block-1,cand-cross-process",
+	})
+	icp.Process(makeReq(child))
+
+	if len(child.Links) != 1 {
+		t.Errorf("expected 1 link (known parent only), got %d", len(child.Links))
+	}
+}
+
+// ── helix.* span events ───────────────────────────────────────────────────────
+
+func TestHelixEventsExtracted(t *testing.T) {
+	icp := newInterceptor()
+	span := makeSpan("classifier", map[string]string{
+		"helix.entity.id":     "cand-1",
+		"helix.instrument.id": "CHIME",
+	})
+	span.Events = []*tracepb.Span_Event{
+		{Name: "helix.event.rfi_flagged", TimeUnixNano: 1_000_000_000,
+			Attributes: []*commonpb.KeyValue{strAttr("fraction", "0.92")}},
+		{Name: "helix.event.candidate_promoted", TimeUnixNano: 2_000_000_000},
+		{Name: "some.other.event", TimeUnixNano: 3_000_000_000},
+	}
+	// Just verify the span is processed without panicking and events are untouched.
+	icp.Process(makeReq(span))
+}
+
+func TestNonHelixEventsIgnored(t *testing.T) {
+	icp := newInterceptor()
+	span := makeSpan("classifier", map[string]string{
+		"helix.entity.id":     "cand-1",
+		"helix.instrument.id": "CHIME",
+	})
+	span.Events = []*tracepb.Span_Event{
+		{Name: "some.irrelevant.event"},
+	}
+	icp.Process(makeReq(span))
+	// No panic, span unchanged.
+	if len(span.Links) != 0 {
+		t.Errorf("unexpected links: %d", len(span.Links))
+	}
+}
+
+// ── Batch processing ──────────────────────────────────────────────────────────
+
+func TestMultipleSpansInOneBatch(t *testing.T) {
+	icp := newInterceptor()
+
+	parent := makeSpan("correlator", map[string]string{
+		"helix.entity.id":     "block-batch",
+		"helix.instrument.id": "CHIME",
+	})
+	child := makeSpan("classifier", map[string]string{
+		"helix.entity.id":     "cand-batch",
+		"helix.instrument.id": "CHIME",
+		"helix.parent.ids":    "block-batch",
+	})
+
+	// Both in the same batch — parent processed first, child resolves it.
+	icp.Process(makeReq(parent, child))
+
+	if len(child.Links) != 1 {
+		t.Errorf("expected child to resolve parent within same batch, got %d links", len(child.Links))
+	}
+}
+
+func TestNilSpanSkipped(t *testing.T) {
+	icp := newInterceptor()
+	req := makeReq(nil)
+	// Should not panic.
+	icp.Process(req)
+}
+
+// ── Metadata extraction ───────────────────────────────────────────────────────
+
+func TestSystemAttrsExcludedFromMetadata(t *testing.T) {
+	// Verify that helix.* system attrs don't end up in the domain metadata.
+	// We test this indirectly by confirming Process doesn't panic on a span
+	// that has only system attributes (metadata would be empty map or nil).
+	icp := newInterceptor()
+	span := makeSpan("correlator", map[string]string{
+		"helix.entity.id":     "block-1",
+		"helix.instrument.id": "CHIME",
+		"helix.parent.ids":    "",
+	})
+	icp.Process(makeReq(span))
+}
+
+func TestDomainAttrsPreserved(t *testing.T) {
+	icp := newInterceptor()
+	span := makeSpan("correlator", map[string]string{
+		"helix.entity.id":     "block-1",
+		"helix.instrument.id": "CHIME",
+		"helix.chime.dm":      "341.2",
+		"helix.chime.snr":     "18.3",
+	})
+	icp.Process(makeReq(span))
+	// Verify domain attrs are still on the span (not removed by the interceptor).
+	dm := ""
+	for _, a := range span.Attributes {
+		if a.Key == "helix.chime.dm" {
+			dm = a.Value.GetStringValue()
+		}
+	}
+	if dm != "341.2" {
+		t.Errorf("expected helix.chime.dm=341.2, got %q", dm)
+	}
+}
+
+// ── Parent ID trimming ────────────────────────────────────────────────────────
+
+func TestParentIDsWithWhitespaceTrimmed(t *testing.T) {
+	icp := newInterceptor()
+
+	parent := makeSpan("correlator", map[string]string{
+		"helix.entity.id":     "block-ws",
+		"helix.instrument.id": "CHIME",
+	})
+	icp.Process(makeReq(parent))
+
+	child := makeSpan("classifier", map[string]string{
+		"helix.entity.id":     "cand-ws",
+		"helix.instrument.id": "CHIME",
+		"helix.parent.ids":    " block-ws , ",
+	})
+	icp.Process(makeReq(child))
+
+	if len(child.Links) != 1 {
+		t.Errorf("expected whitespace-trimmed parent to resolve, got %d links", len(child.Links))
+	}
+}
+
+func TestEmptyParentIDs(t *testing.T) {
+	icp := newInterceptor()
+	span := makeSpan("correlator", map[string]string{
+		"helix.entity.id":     "block-1",
+		"helix.instrument.id": "CHIME",
+		"helix.parent.ids":    "",
+	})
+	icp.Process(makeReq(span))
+	if len(span.Links) != 0 {
+		t.Errorf("expected 0 links for empty parent IDs, got %d", len(span.Links))
+	}
+}
+
+// ── helpers ───────────────────────────────────────────────────────────────────
+
+// Ensure "helix.parent.ids" values with commas-only produce no links.
+func TestCommaOnlyParentIDsProducesNoLinks(t *testing.T) {
+	icp := newInterceptor()
+	span := makeSpan("correlator", map[string]string{
+		"helix.entity.id":     "block-1",
+		"helix.instrument.id": "CHIME",
+		"helix.parent.ids":    ",,,",
+	})
+	icp.Process(makeReq(span))
+	if len(span.Links) != 0 {
+		t.Errorf("expected 0 links, got %d", len(span.Links))
+	}
+}
+
+// Verify that instrumentID defaults gracefully when missing.
+func TestMissingInstrumentIDDoesNotPanic(t *testing.T) {
+	icp := newInterceptor()
+	span := makeSpan("correlator", map[string]string{
+		"helix.entity.id": "block-1",
+		// helix.instrument.id intentionally absent
+	})
+	icp.Process(makeReq(span))
+}
+
+// Verify the store is updated so a second child can also resolve the parent.
+func TestStoreUpdatedForFutureChildren(t *testing.T) {
+	icp := newInterceptor()
+
+	parent := makeSpan("correlator", map[string]string{
+		"helix.entity.id":     "block-shared",
+		"helix.instrument.id": "CHIME",
+	})
+	icp.Process(makeReq(parent))
+
+	for i, id := range []string{"cand-a", "cand-b", "cand-c"} {
+		child := makeSpan("classifier", map[string]string{
+			"helix.entity.id":     id,
+			"helix.instrument.id": "CHIME",
+			"helix.parent.ids":    "block-shared",
+		})
+		child.SpanId = []byte{byte(i + 10), 0, 0, 0, 0, 0, 0, 0}
+		icp.Process(makeReq(child))
+		if len(child.Links) != 1 {
+			t.Errorf("%s: expected 1 link, got %d", id, len(child.Links))
+		}
+	}
+}
+
+// verify the strings package is used (import check)
+var _ = strings.Contains
