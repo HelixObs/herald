@@ -1,0 +1,57 @@
+name: helixobs-e2e-gateway
+
+# Minimal stack for gateway e2e tests.
+# Expose ports so tests running on the host can reach services.
+
+volumes:
+  db-data:
+
+networks:
+  e2e:
+
+services:
+  db:
+    image: timescale/timescaledb:latest-pg16
+    environment:
+      POSTGRES_USER:     helix
+      POSTGRES_PASSWORD: helix
+      POSTGRES_DB:       helixobs
+    volumes:
+      - db-data:/var/lib/postgresql/data
+      - ../migrations/001_init.sql:/docker-entrypoint-initdb.d/001_init.sql:ro
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U helix -d helixobs"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks: [e2e]
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:latest
+    command: ["--config=/etc/otel/config.yml"]
+    volumes:
+      - ./otel-collector-config.yml:/etc/otel/config.yml:ro
+    networks: [e2e]
+
+  gateway:
+    build:
+      context: ../   # gateway repo root
+    environment:
+      GATEWAY_ADDR:       ":4317"
+      COLLECTOR_ENDPOINT: "otel-collector:4317"
+      DB_URL:             "postgres://helix:helix@db:5432/helixobs"
+      METRICS_ADDR:       ":2112"
+    ports:
+      - "4317:4317"
+      - "2112:2112"
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:2112/metrics > /dev/null"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks: [e2e]

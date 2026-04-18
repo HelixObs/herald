@@ -1,0 +1,37 @@
+name: E2E
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Start stack
+        run: docker compose -f e2e/docker-compose.yml up -d --build --wait
+        timeout-minutes: 10
+
+      - name: Run e2e tests
+        run: go test -v -tags e2e -timeout 60s ./e2e/
+        env:
+          GATEWAY_ADDR: "localhost:4317"
+          METRICS_URL:  "http://localhost:2112/metrics"
+          TEST_DB_URL:  "postgres://helix:helix@localhost:5432/helixobs"
+
+      - name: Dump logs on failure
+        if: failure()
+        run: docker compose -f e2e/docker-compose.yml logs
+
+      - name: Tear down
+        if: always()
+        run: docker compose -f e2e/docker-compose.yml down -v
