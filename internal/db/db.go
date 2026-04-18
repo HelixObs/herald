@@ -58,12 +58,18 @@ func (s *Store) WriteEntity(ctx context.Context, e Entity) error {
 	if err != nil {
 		return fmt.Errorf("marshal metadata: %w", err)
 	}
+	parentIDs := e.ParentIDs
+	if parentIDs == nil {
+		parentIDs = []string{}
+	}
 	_, err = s.pool.Exec(ctx, `
 		INSERT INTO entities
 			(id, instrument_id, trace_id, timestamp_ns, parent_ids, metadata)
-		VALUES ($1, $2, $3, $4, $5, $6)
-		ON CONFLICT (id, instrument_id) DO NOTHING`,
-		e.ID, e.InstrumentID, e.TraceID, e.TimestampNs, e.ParentIDs, meta,
+		SELECT $1, $2, $3, $4, $5, $6
+		WHERE NOT EXISTS (
+			SELECT 1 FROM entities WHERE id = $1 AND instrument_id = $2
+		)`,
+		e.ID, e.InstrumentID, e.TraceID, e.TimestampNs, parentIDs, meta,
 	)
 	return err
 }

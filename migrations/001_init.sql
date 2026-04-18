@@ -23,11 +23,14 @@ SELECT create_hypertable('entities', 'created_at',
     chunk_time_interval => INTERVAL '7 days',
     if_not_exists       => TRUE);
 
+ALTER TABLE entities SET (timescaledb.compress, timescaledb.compress_orderby = 'created_at DESC');
 SELECT add_compression_policy('entities', INTERVAL '7 days', if_not_exists => TRUE);
 SELECT add_retention_policy('entities',   INTERVAL '90 days', if_not_exists => TRUE);
 
--- Idempotent ingest: duplicate (id, instrument_id) pairs are ignored.
-CREATE UNIQUE INDEX IF NOT EXISTS idx_entities_unique
+-- Lookup index used by the WHERE NOT EXISTS deduplication in WriteEntity.
+-- TimescaleDB hypertables cannot have a unique index that omits the
+-- partitioning column (created_at), so deduplication is application-level.
+CREATE INDEX IF NOT EXISTS idx_entities_id
     ON entities (id, instrument_id);
 
 -- Most common query pattern: all entities for an instrument in a time window.
