@@ -17,7 +17,6 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/reflection"
 
-	"github.com/HelixObs/gateway/internal/api"
 	"github.com/HelixObs/gateway/internal/db"
 	"github.com/HelixObs/gateway/internal/interceptor"
 	"github.com/HelixObs/gateway/internal/metrics"
@@ -81,15 +80,6 @@ func run() error {
 		}
 	}()
 
-	// ── GraphQL API ───────────────────────────────────────────────────
-	apiSrv := &http.Server{Addr: cfg.apiAddr, Handler: api.NewHandler(dbStore)}
-	go func() {
-		slog.Info("api listening", "addr", cfg.apiAddr)
-		if err := apiSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			slog.Error("api server error", "error", err)
-		}
-	}()
-
 	// ── Serve ─────────────────────────────────────────────────────────
 	errCh := make(chan error, 1)
 	go func() { errCh <- grpcSrv.Serve(lis) }()
@@ -99,7 +89,6 @@ func run() error {
 		slog.Info("shutting down...")
 		grpcSrv.GracefulStop()
 		promSrv.Shutdown(context.Background()) //nolint:errcheck
-		apiSrv.Shutdown(context.Background())  //nolint:errcheck
 		return nil
 	case err := <-errCh:
 		return fmt.Errorf("grpc serve: %w", err)
@@ -113,7 +102,6 @@ type config struct {
 	collectorEndpoint string
 	dbURL             string
 	metricsAddr       string
-	apiAddr           string
 	traceStoreSize    int
 }
 
@@ -123,7 +111,6 @@ func configFromEnv() config {
 		collectorEndpoint: envOr("COLLECTOR_ENDPOINT", "otel-collector:4317"),
 		dbURL:             envOr("DB_URL", "postgres://helix:helix@db:5432/helixobs"),
 		metricsAddr:       envOr("METRICS_ADDR", ":2112"),
-		apiAddr:           envOr("API_ADDR", ":8080"),
 		traceStoreSize:    10_000,
 	}
 }
