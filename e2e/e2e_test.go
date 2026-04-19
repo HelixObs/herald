@@ -35,7 +35,6 @@ import (
 
 func gatewayAddr() string { return envOr("GATEWAY_ADDR", "localhost:4317") }
 func metricsURL() string  { return envOr("METRICS_URL", "http://localhost:2112/metrics") }
-func apiURL() string      { return envOr("API_URL", "http://localhost:8080") }
 func dbURL() string       { return envOr("TEST_DB_URL", "postgres://helix:helix@localhost:5432/helixobs") }
 
 func envOr(key, fallback string) string {
@@ -49,31 +48,25 @@ func envOr(key, fallback string) string {
 
 func TestMain(m *testing.M) {
 	fmt.Println("e2e: waiting for gateway...")
-	if err := waitForURL(metricsURL(), 30*time.Second); err != nil {
-		fmt.Fprintf(os.Stderr, "e2e: metrics not ready: %v\n", err)
+	if err := waitForMetrics(30 * time.Second); err != nil {
+		fmt.Fprintf(os.Stderr, "e2e: gateway not ready: %v\n", err)
 		os.Exit(1)
 	}
-	if err := waitForURL(apiURL()+"/", 10*time.Second); err != nil {
-		fmt.Fprintf(os.Stderr, "e2e: api not ready: %v\n", err)
-		os.Exit(1)
-	}
-	fmt.Println("e2e: stack ready")
+	fmt.Println("e2e: gateway ready")
 	os.Exit(m.Run())
 }
 
-func waitForMetrics(timeout time.Duration) error { return waitForURL(metricsURL(), timeout) }
-
-func waitForURL(url string, timeout time.Duration) error {
+func waitForMetrics(timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		resp, err := http.Get(url)
+		resp, err := http.Get(metricsURL())
 		if err == nil && resp.StatusCode == 200 {
 			resp.Body.Close()
 			return nil
 		}
 		time.Sleep(500 * time.Millisecond)
 	}
-	return fmt.Errorf("timed out waiting for %s after %s", url, timeout)
+	return fmt.Errorf("timed out after %s", timeout)
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
