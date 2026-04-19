@@ -9,6 +9,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -21,6 +22,7 @@ type Entity struct {
 	TimestampNs  int64
 	ParentIDs    []string
 	Metadata     map[string]string
+	CreatedAt    time.Time
 }
 
 // EntityOperation is one row written to the entity_operations hypertable.
@@ -33,6 +35,7 @@ type EntityOperation struct {
 	TraceID      string
 	TimestampNs  int64
 	Metadata     map[string]string
+	CreatedAt    time.Time
 }
 
 // EntityEvent is one row written to the entity_events hypertable.
@@ -42,6 +45,7 @@ type EntityEvent struct {
 	EventName    string
 	TimestampNs  int64
 	Metadata     map[string]string
+	CreatedAt    time.Time
 }
 
 // Store wraps a pgxpool.Pool with HelixObs-specific write methods.
