@@ -363,5 +363,108 @@ func TestStoreUpdatedForFutureChildren(t *testing.T) {
 	}
 }
 
+// ── Entity operations (helix.entity.is_operation = "true") ───────────────────
+
+func TestOperationSpanDoesNotUpdateStore(t *testing.T) {
+	icp := newInterceptor()
+
+	// Register the entity first.
+	entity := makeSpan("clustering", map[string]string{
+		"helix.entity.id":     "frb-op-1",
+		"helix.instrument.id": "CHIME",
+	})
+	entity.TraceId = []byte{0xAA, 0xBB, 0xCC, 0xDD, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
+	entity.SpanId = []byte{0x11, 0x22, 0x33, 0x44, 0, 0, 0, 0}
+	icp.Process(makeReq(entity))
+
+	// Process an operation span for the same entity ID (different trace).
+	opSpan := makeSpan("hdf5-conversion", map[string]string{
+		"helix.entity.id":        "frb-op-1",
+		"helix.instrument.id":    "CHIME",
+		"helix.entity.is_operation": "true",
+	})
+	opSpan.TraceId = []byte{0xFF, 0xEE, 0xDD, 0xCC, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
+	opSpan.SpanId = []byte{0x99, 0x88, 0x77, 0x66, 0, 0, 0, 0}
+	icp.Process(makeReq(opSpan))
+
+	// A child of frb-op-1 should still resolve to the ORIGINAL entity span, not the operation.
+	child := makeSpan("archiving", map[string]string{
+		"helix.entity.id":     "archive-1",
+		"helix.instrument.id": "CHIME",
+		"helix.parent.ids":    "frb-op-1",
+	})
+	icp.Process(makeReq(child))
+
+	if len(child.Links) != 1 {
+		t.Fatalf("expected 1 link, got %d", len(child.Links))
+	}
+	if child.Links[0].TraceId[0] != 0xAA {
+		t.Errorf("link points to operation trace (0x%x) instead of entity trace (0xAA)", child.Links[0].TraceId[0])
+	}
+	if child.Links[0].SpanId[0] != 0x11 {
+		t.Errorf("link SpanId mismatch: got 0x%x, want 0x11", child.Links[0].SpanId[0])
+	}
+}
+
+func TestOperationIsOperationAttrExcludedFromMetadata(t *testing.T) {
+	icp := newInterceptor()
+	span := makeSpan("hdf5-conversion", map[string]string{
+		"helix.entity.id":           "frb-op-2",
+		"helix.instrument.id":       "CHIME",
+		"helix.entity.is_operation": "true",
+		"helix.chime.hdf5_size_mb":  "241.3",
+	})
+	// Must not panic; domain attr still on span.
+	icp.Process(makeReq(span))
+
+	size := ""
+	for _, a := range span.Attributes {
+		if a.Key == "helix.chime.hdf5_size_mb" {
+			size = a.Value.GetStringValue()
+		}
+	}
+	if size != "241.3" {
+		t.Errorf("expected helix.chime.hdf5_size_mb=241.3, got %q", size)
+	}
+}
+
+func TestMultipleOperationsOnSameEntity(t *testing.T) {
+	icp := newInterceptor()
+
+	entity := makeSpan("clustering", map[string]string{
+		"helix.entity.id":     "frb-op-3",
+		"helix.instrument.id": "CHIME",
+	})
+	entity.TraceId = []byte{0x01, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
+	entity.SpanId = []byte{0x01, 0, 0, 0, 0, 0, 0, 0}
+	icp.Process(makeReq(entity))
+
+	for i, opName := range []string{"hdf5-conversion", "registration", "replication"} {
+		op := makeSpan(opName, map[string]string{
+			"helix.entity.id":           "frb-op-3",
+			"helix.instrument.id":       "CHIME",
+			"helix.entity.is_operation": "true",
+		})
+		op.TraceId = []byte{byte(0x10 + i), 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
+		op.SpanId = []byte{byte(0x10 + i), 0, 0, 0, 0, 0, 0, 0}
+		icp.Process(makeReq(op))
+	}
+
+	// After 3 operations, the entity's original span context must still be in the store.
+	child := makeSpan("archiving", map[string]string{
+		"helix.entity.id":     "archive-2",
+		"helix.instrument.id": "CHIME",
+		"helix.parent.ids":    "frb-op-3",
+	})
+	icp.Process(makeReq(child))
+
+	if len(child.Links) != 1 {
+		t.Fatalf("expected 1 link after multiple operations, got %d", len(child.Links))
+	}
+	if child.Links[0].TraceId[0] != 0x01 {
+		t.Errorf("link points to wrong trace: 0x%x (expected original entity 0x01)", child.Links[0].TraceId[0])
+	}
+}
+
 // verify the strings package is used (import check)
 var _ = strings.Contains

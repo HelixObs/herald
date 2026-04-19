@@ -36,6 +36,7 @@ const (
 	attrEntityID     = "helix.entity.id"
 	attrInstrumentID = "helix.instrument.id"
 	attrParentIDs    = "helix.parent.ids"
+	attrIsOperation  = "helix.entity.is_operation"
 )
 
 // Interceptor processes an ExportTraceServiceRequest in-place before it is
@@ -72,6 +73,7 @@ func (icp *Interceptor) processSpan(span *tracepb.Span) {
 
 	instrumentID := attrStr(span.Attributes, attrInstrumentID)
 	parentIDsStr := attrStr(span.Attributes, attrParentIDs)
+	isOperation  := attrStr(span.Attributes, attrIsOperation) == "true"
 
 	// ── Resolve parent entity IDs → span links ────────────────────────
 	var parentIDs []string
@@ -95,11 +97,16 @@ func (icp *Interceptor) processSpan(span *tracepb.Span) {
 		}
 	}
 
-	// ── Register this entity for future children ──────────────────────
-	icp.store.Put(entityID, &store.SpanRef{
-		TraceID: span.TraceId,
-		SpanID:  span.SpanId,
-	})
+	// ── Register in TraceStore — only for entities, not operations ────
+	// Operations must not overwrite the entity's stored SpanContext; doing
+	// so would cause future children to link to an operation trace instead
+	// of the entity's creation trace.
+	if !isOperation {
+		icp.store.Put(entityID, &store.SpanRef{
+			TraceID: span.TraceId,
+			SpanID:  span.SpanId,
+		})
+	}
 
 	// ── Extract helix.* span events ───────────────────────────────────
 	var events []db.EntityEvent
@@ -132,20 +139,38 @@ func (icp *Interceptor) processSpan(span *tracepb.Span) {
 		return // nil DB is used in unit tests
 	}
 
-	entity := db.Entity{
-		ID:           entityID,
-		InstrumentID: instrumentID,
-		TraceID:      hex.EncodeToString(span.TraceId),
-		TimestampNs:  int64(span.StartTimeUnixNano),
-		ParentIDs:    parentIDs,
-		Metadata:     attrsToMetadata(span.Attributes),
-	}
-	go func() {
-		if err := icp.db.WriteEntity(context.Background(), entity); err != nil {
-			slog.Warn("entity write failed", "entity_id", entity.ID, "error", err)
-			icp.metrics.DBWriteErrorsTotal.Inc()
+	if isOperation {
+		op := db.EntityOperation{
+			EntityID:     entityID,
+			InstrumentID: instrumentID,
+			Operation:    span.Name,
+			TraceID:      hex.EncodeToString(span.TraceId),
+			TimestampNs:  int64(span.StartTimeUnixNano),
+			Metadata:     attrsToMetadata(span.Attributes),
 		}
-	}()
+		go func() {
+			if err := icp.db.WriteEntityOperation(context.Background(), op); err != nil {
+				slog.Warn("entity operation write failed", "entity_id", op.EntityID, "operation", op.Operation, "error", err)
+				icp.metrics.DBWriteErrorsTotal.Inc()
+			}
+		}()
+	} else {
+		entity := db.Entity{
+			ID:           entityID,
+			InstrumentID: instrumentID,
+			TraceID:      hex.EncodeToString(span.TraceId),
+			TimestampNs:  int64(span.StartTimeUnixNano),
+			ParentIDs:    parentIDs,
+			Metadata:     attrsToMetadata(span.Attributes),
+		}
+		go func() {
+			if err := icp.db.WriteEntity(context.Background(), entity); err != nil {
+				slog.Warn("entity write failed", "entity_id", entity.ID, "error", err)
+				icp.metrics.DBWriteErrorsTotal.Inc()
+			}
+		}()
+	}
+
 	for _, ev := range events {
 		ev := ev
 		go func() {
@@ -191,7 +216,7 @@ func attrsToMetadata(attrs []*commonpb.KeyValue) map[string]string {
 	}
 	m := make(map[string]string, len(attrs))
 	for _, kv := range attrs {
-		if kv.Key == attrEntityID || kv.Key == attrInstrumentID || kv.Key == attrParentIDs {
+		if kv.Key == attrEntityID || kv.Key == attrInstrumentID || kv.Key == attrParentIDs || kv.Key == attrIsOperation {
 			continue
 		}
 		m[kv.Key] = anyValueStr(kv.Value)

@@ -46,6 +46,35 @@ CREATE INDEX IF NOT EXISTS idx_entities_metadata
     ON entities USING GIN (metadata);
 
 
+-- ── Entity operations ────────────────────────────────────────────────────────
+-- One row per independent operation performed on an existing entity after its
+-- creation trace has ended.  Examples: hdf5-conversion, registration, replication.
+-- Each operation has its own OTel trace, so operators can drill into each one
+-- independently, but they are linked to the originating entity by entity_id.
+
+CREATE TABLE IF NOT EXISTS entity_operations (
+    entity_id     TEXT        NOT NULL,
+    instrument_id TEXT        NOT NULL,
+    operation     TEXT        NOT NULL,
+    trace_id      TEXT,
+    timestamp_ns  BIGINT      NOT NULL,
+    metadata      JSONB       NOT NULL DEFAULT '{}',
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+SELECT create_hypertable('entity_operations', 'created_at',
+    chunk_time_interval => INTERVAL '7 days',
+    if_not_exists       => TRUE);
+
+SELECT add_retention_policy('entity_operations', INTERVAL '90 days', if_not_exists => TRUE);
+
+CREATE INDEX IF NOT EXISTS idx_entity_operations_entity_time
+    ON entity_operations (entity_id, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_entity_operations_op_time
+    ON entity_operations (instrument_id, operation, created_at DESC);
+
+
 -- ── Entity events ─────────────────────────────────────────────────────────────
 -- One row per helix.* span event extracted by the gateway interceptor.
 -- Covers helix.error, helix.event.rfi_flagged, helix.event.candidate_promoted,

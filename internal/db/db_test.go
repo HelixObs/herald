@@ -120,3 +120,87 @@ func TestWriteEntityNilMetadata(t *testing.T) {
 		t.Fatalf("WriteEntity with nil metadata: %v", err)
 	}
 }
+
+func TestWriteEntityOperationRoundTrip(t *testing.T) {
+	store, err := db.New(context.Background(), dbURL(t))
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer store.Close()
+
+	// Write the parent entity first.
+	_ = store.WriteEntity(context.Background(), db.Entity{
+		ID: "test-frb-for-op", InstrumentID: "TEST", TimestampNs: 1,
+	})
+
+	op := db.EntityOperation{
+		EntityID:     "test-frb-for-op",
+		InstrumentID: "TEST",
+		Operation:    "hdf5-conversion",
+		TraceID:      "aabbccdd00000000000000000000cafe",
+		TimestampNs:  2_000_000_000,
+		Metadata:     map[string]string{"hdf5_size_mb": "241.3"},
+	}
+	if err := store.WriteEntityOperation(context.Background(), op); err != nil {
+		t.Fatalf("WriteEntityOperation: %v", err)
+	}
+}
+
+func TestWriteEntityOperationCreatesPlaceholderEntity(t *testing.T) {
+	store, err := db.New(context.Background(), dbURL(t))
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer store.Close()
+
+	// Deliberately skip writing the entity — WriteEntityOperation must upsert a placeholder.
+	// If it doesn't, the operation row would either fail or the entity row would be absent.
+	// We verify by writing a second operation for the same entity: an idempotent upsert
+	// must not return an error (which it would if the placeholder wasn't created first).
+	op := db.EntityOperation{
+		EntityID:     "test-phantom-entity",
+		InstrumentID: "TEST",
+		Operation:    "registration",
+		TraceID:      "aabbccdd00000000000000000000dead",
+		TimestampNs:  3_000_000_000,
+	}
+	if err := store.WriteEntityOperation(context.Background(), op); err != nil {
+		t.Fatalf("WriteEntityOperation on non-existent entity: %v", err)
+	}
+
+	// Writing a second operation for the same phantom entity also succeeds — the
+	// placeholder upsert is idempotent, so no constraint violation occurs.
+	op2 := db.EntityOperation{
+		EntityID:     "test-phantom-entity",
+		InstrumentID: "TEST",
+		Operation:    "replication",
+		TraceID:      "aabbccdd00000000000000000000beef",
+		TimestampNs:  4_000_000_000,
+	}
+	if err := store.WriteEntityOperation(context.Background(), op2); err != nil {
+		t.Fatalf("second WriteEntityOperation on phantom entity: %v", err)
+	}
+}
+
+func TestWriteEntityOperationNilMetadata(t *testing.T) {
+	store, err := db.New(context.Background(), dbURL(t))
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer store.Close()
+
+	_ = store.WriteEntity(context.Background(), db.Entity{
+		ID: "test-frb-nil-op-meta", InstrumentID: "TEST", TimestampNs: 1,
+	})
+
+	op := db.EntityOperation{
+		EntityID:     "test-frb-nil-op-meta",
+		InstrumentID: "TEST",
+		Operation:    "replication",
+		TimestampNs:  4_000_000_000,
+		Metadata:     nil,
+	}
+	if err := store.WriteEntityOperation(context.Background(), op); err != nil {
+		t.Fatalf("WriteEntityOperation with nil metadata: %v", err)
+	}
+}

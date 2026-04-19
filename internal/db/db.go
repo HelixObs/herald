@@ -23,6 +23,18 @@ type Entity struct {
 	Metadata     map[string]string
 }
 
+// EntityOperation is one row written to the entity_operations hypertable.
+// It records an independent operation performed on an existing entity after
+// that entity's creation trace has ended.
+type EntityOperation struct {
+	EntityID     string
+	InstrumentID string
+	Operation    string
+	TraceID      string
+	TimestampNs  int64
+	Metadata     map[string]string
+}
+
 // EntityEvent is one row written to the entity_events hypertable.
 type EntityEvent struct {
 	InstrumentID string
@@ -70,6 +82,39 @@ func (s *Store) WriteEntity(ctx context.Context, e Entity) error {
 			SELECT 1 FROM entities WHERE id = $1 AND instrument_id = $2
 		)`,
 		e.ID, e.InstrumentID, e.TraceID, e.TimestampNs, parentIDs, meta,
+	)
+	return err
+}
+
+// WriteEntityOperation inserts one entity_operation row.
+// If the target entity does not yet exist (e.g. the operation was submitted
+// before the creation span arrived, or the entity was never formally tracked),
+// a minimal placeholder entity row is created so the Entity Inspector always
+// has something to display.
+func (s *Store) WriteEntityOperation(ctx context.Context, op EntityOperation) error {
+	meta, err := json.Marshal(op.Metadata)
+	if err != nil {
+		return fmt.Errorf("marshal metadata: %w", err)
+	}
+
+	// Ensure entity exists — no-op if it was already created normally.
+	_, err = s.pool.Exec(ctx, `
+		INSERT INTO entities (id, instrument_id, timestamp_ns, parent_ids, metadata)
+		SELECT $1, $2, $3, '{}', '{}'
+		WHERE NOT EXISTS (
+			SELECT 1 FROM entities WHERE id = $1 AND instrument_id = $2
+		)`,
+		op.EntityID, op.InstrumentID, op.TimestampNs,
+	)
+	if err != nil {
+		return fmt.Errorf("ensure entity: %w", err)
+	}
+
+	_, err = s.pool.Exec(ctx, `
+		INSERT INTO entity_operations
+			(entity_id, instrument_id, operation, trace_id, timestamp_ns, metadata)
+		VALUES ($1, $2, $3, $4, $5, $6)`,
+		op.EntityID, op.InstrumentID, op.Operation, op.TraceID, op.TimestampNs, meta,
 	)
 	return err
 }
