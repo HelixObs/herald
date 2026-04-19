@@ -39,7 +39,7 @@ type eventFilterInput struct {
 // ── Root resolver (implements Query) ─────────────────────────────────────────
 
 type rootResolver struct {
-	db *db.Store
+	db Querier
 }
 
 func (r *rootResolver) Entity(ctx context.Context, args struct {
@@ -95,7 +95,7 @@ func (r *rootResolver) EntityEvents(ctx context.Context, args struct {
 
 type entityResolver struct {
 	e  db.Entity
-	db *db.Store
+	db Querier
 }
 
 func (r *entityResolver) ID() graphql.ID      { return graphql.ID(r.e.ID) }

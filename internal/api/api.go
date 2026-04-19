@@ -9,6 +9,7 @@
 package api
 
 import (
+	"context"
 	"net/http"
 
 	graphql "github.com/graph-gophers/graphql-go"
@@ -16,6 +17,15 @@ import (
 
 	"github.com/HelixObs/gateway/internal/db"
 )
+
+// Querier is the read-only interface the GraphQL resolvers depend on.
+// *db.Store satisfies it; tests can substitute a lightweight stub.
+type Querier interface {
+	GetEntity(ctx context.Context, id string) (*db.Entity, error)
+	ListEntities(ctx context.Context, f db.EntityFilter) ([]db.Entity, error)
+	ListEntityOperations(ctx context.Context, entityID string, f db.OperationFilter) ([]db.EntityOperation, error)
+	ListEntityEvents(ctx context.Context, entityID string, f db.EventFilter) ([]db.EntityEvent, error)
+}
 
 const schemaStr = `
 	schema { query: Query }
@@ -104,8 +114,8 @@ const schemaStr = `
 `
 
 // NewHandler returns an http.Handler that serves the GraphQL API and GraphiQL playground.
-func NewHandler(store *db.Store) http.Handler {
-	schema := graphql.MustParseSchema(schemaStr, &rootResolver{db: store},
+func NewHandler(q Querier) http.Handler {
+	schema := graphql.MustParseSchema(schemaStr, &rootResolver{db: q},
 		graphql.UseFieldResolvers(),
 	)
 	mux := http.NewServeMux()
