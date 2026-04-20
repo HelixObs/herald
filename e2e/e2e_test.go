@@ -12,6 +12,7 @@ package e2e_test
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"math/rand"
@@ -35,6 +36,7 @@ import (
 
 func gatewayAddr() string { return envOr("GATEWAY_ADDR", "localhost:4317") }
 func metricsURL() string  { return envOr("METRICS_URL", "http://localhost:2112/metrics") }
+func apiURL() string      { return envOr("API_URL", "http://localhost:8080") }
 func dbURL() string       { return envOr("TEST_DB_URL", "postgres://helix:helix@localhost:5432/helixobs") }
 
 func envOr(key, fallback string) string {
@@ -126,6 +128,54 @@ func TestEntitiesTotalCounterIncremented(t *testing.T) {
 	pollUntil(t, 10*time.Second, func() bool {
 		return scrapeCounter(t, "helix_entities_total") > before
 	}, "helix_entities_total did not increment")
+}
+
+func TestGraphAPIReturnsProvenance(t *testing.T) {
+	parentID := fmt.Sprintf("e2e-graph-parent-%d", rand.Int63())
+	childID := fmt.Sprintf("e2e-graph-child-%d", rand.Int63())
+
+	sendHelixSpan(t, parentID, "CHIME", "x-engine", nil)
+	sendHelixSpan(t, childID, "CHIME", "classifier", []string{parentID})
+
+	type graphResponse struct {
+		Nodes []struct {
+			ID string `json:"id"`
+		} `json:"nodes"`
+		Edges []struct {
+			Source string `json:"source"`
+			Target string `json:"target"`
+		} `json:"edges"`
+	}
+
+	url := fmt.Sprintf("%s/api/v1/entity/%s/graph", apiURL(), childID)
+
+	var got graphResponse
+	pollUntil(t, 15*time.Second, func() bool {
+		resp, err := http.Get(url)
+		if err != nil || resp.StatusCode != http.StatusOK {
+			return false
+		}
+		defer resp.Body.Close()
+		if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+			return false
+		}
+		// Keep polling until both nodes are present.
+		nodeIDs := map[string]bool{}
+		for _, n := range got.Nodes {
+			nodeIDs[n.ID] = true
+		}
+		return nodeIDs[parentID] && nodeIDs[childID]
+	}, "graph for %q never contained both nodes", childID)
+
+	edgeFound := false
+	for _, e := range got.Edges {
+		if e.Source == parentID && e.Target == childID {
+			edgeFound = true
+		}
+	}
+	if !edgeFound {
+		t.Errorf("edge %q → %q not found; edges: %+v", parentID, childID, got.Edges)
+	}
 }
 
 func TestNonHelixSpanPassesThrough(t *testing.T) {

@@ -43,9 +43,11 @@ services:
       COLLECTOR_ENDPOINT: "otel-collector:4317"
       DB_URL:             "postgres://helix:helix@db:5432/helixobs"
       METRICS_ADDR:       ":2112"
+      API_ADDR:           ":8080"
     ports:
       - "4317:4317"
       - "2112:2112"
+      - "8080:8080"
     depends_on:
       db:
         condition: service_healthy

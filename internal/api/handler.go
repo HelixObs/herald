@@ -4,6 +4,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"log/slog"
 	"net/http"
@@ -11,14 +12,19 @@ import (
 	"github.com/HelixObs/gateway/internal/db"
 )
 
+// Querier is the database interface the Handler depends on.
+type Querier interface {
+	QueryEntityGraph(ctx context.Context, entityID string, maxDepth int) (*db.EntityGraph, error)
+}
+
 // Handler serves the HelixObs query API.
 type Handler struct {
-	db  *db.Store
+	db  Querier
 	mux *http.ServeMux
 }
 
 // New registers all API routes and returns a ready Handler.
-func New(d *db.Store) *Handler {
+func New(d Querier) *Handler {
 	h := &Handler{db: d, mux: http.NewServeMux()}
 	h.mux.HandleFunc("GET /api/v1/entity/{entity_id}/graph", h.entityGraph)
 	return h

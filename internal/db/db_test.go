@@ -182,6 +182,68 @@ func TestWriteEntityOperationCreatesPlaceholderEntity(t *testing.T) {
 	}
 }
 
+func TestQueryEntityGraph(t *testing.T) {
+	store, err := db.New(context.Background(), dbURL(t))
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer store.Close()
+
+	parentID := "test-graph-parent"
+	childID := "test-graph-child"
+
+	_ = store.WriteEntity(context.Background(), db.Entity{
+		ID: parentID, InstrumentID: "TEST", TimestampNs: 1,
+	})
+	_ = store.WriteEntity(context.Background(), db.Entity{
+		ID: childID, InstrumentID: "TEST", TimestampNs: 2, ParentIDs: []string{parentID},
+	})
+	_ = store.WriteEntityEvent(context.Background(), db.EntityEvent{
+		InstrumentID: "TEST", EntityID: childID, EventName: "helix.error", TimestampNs: 3,
+	})
+
+	g, err := store.QueryEntityGraph(context.Background(), childID, 10)
+	if err != nil {
+		t.Fatalf("QueryEntityGraph: %v", err)
+	}
+	if g == nil {
+		t.Fatal("expected non-nil graph, got nil")
+	}
+
+	nodeIDs := map[string]bool{}
+	for _, n := range g.Nodes {
+		nodeIDs[n.ID] = true
+		if n.ID == childID && !n.HasError {
+			t.Error("child node should have HasError=true")
+		}
+	}
+	if !nodeIDs[parentID] {
+		t.Errorf("parent node %q missing from graph", parentID)
+	}
+	if !nodeIDs[childID] {
+		t.Errorf("child node %q missing from graph", childID)
+	}
+
+	edgeFound := false
+	for _, e := range g.Edges {
+		if e.Source == parentID && e.Target == childID {
+			edgeFound = true
+		}
+	}
+	if !edgeFound {
+		t.Errorf("edge %q → %q not found in graph", parentID, childID)
+	}
+
+	// Non-existent entity returns nil, no error.
+	g2, err := store.QueryEntityGraph(context.Background(), "nonexistent-entity-xyz", 10)
+	if err != nil {
+		t.Fatalf("QueryEntityGraph not-found: %v", err)
+	}
+	if g2 != nil {
+		t.Error("expected nil for non-existent entity, got non-nil")
+	}
+}
+
 func TestWriteEntityOperationNilMetadata(t *testing.T) {
 	store, err := db.New(context.Background(), dbURL(t))
 	if err != nil {
