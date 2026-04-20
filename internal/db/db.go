@@ -63,6 +63,130 @@ func New(ctx context.Context, connStr string) (*Store, error) {
 
 func (s *Store) Close() { s.pool.Close() }
 
+// GraphNode is one entity in a provenance graph response.
+type GraphNode struct {
+	ID           string            `json:"id"`
+	InstrumentID string            `json:"instrument_id"`
+	TraceID      string            `json:"trace_id"`
+	TimestampNs  int64             `json:"timestamp_ns"`
+	ParentIDs    []string          `json:"parent_ids"`
+	Metadata     map[string]string `json:"metadata"`
+	HasError     bool              `json:"has_error"`
+}
+
+// GraphEdge is a directed edge from parent to child.
+type GraphEdge struct {
+	Source string `json:"source"` // parent entity ID
+	Target string `json:"target"` // child entity ID
+}
+
+// EntityGraph is the full provenance graph returned by the API.
+type EntityGraph struct {
+	Nodes []GraphNode `json:"nodes"`
+	Edges []GraphEdge `json:"edges"`
+}
+
+// QueryEntityGraph returns the provenance DAG for one entity — all ancestors
+// up to maxDepth levels and direct descendants one level down.
+// Nodes are de-duplicated; edges are derived from parent_ids relationships.
+func (s *Store) QueryEntityGraph(ctx context.Context, entityID string, maxDepth int) (*EntityGraph, error) {
+	rows, err := s.pool.Query(ctx, `
+		WITH RECURSIVE ancestors AS (
+			SELECT id, instrument_id, trace_id, timestamp_ns, parent_ids, metadata, 0 AS depth
+			FROM entities
+			WHERE id = $1
+			UNION
+			SELECT e.id, e.instrument_id, e.trace_id, e.timestamp_ns, e.parent_ids, e.metadata, a.depth + 1
+			FROM entities e
+			INNER JOIN ancestors a ON e.id = ANY(a.parent_ids)
+			WHERE a.depth < $2
+		),
+		descendants AS (
+			SELECT id, instrument_id, trace_id, timestamp_ns, parent_ids, metadata, 0 AS depth
+			FROM entities
+			WHERE id = $1
+			UNION
+			SELECT e.id, e.instrument_id, e.trace_id, e.timestamp_ns, e.parent_ids, e.metadata, d.depth + 1
+			FROM entities e
+			INNER JOIN descendants d ON d.id = ANY(e.parent_ids)
+			WHERE d.depth < 2
+		)
+		SELECT DISTINCT id, instrument_id, COALESCE(trace_id, ''), timestamp_ns, parent_ids, metadata
+		FROM (SELECT * FROM ancestors UNION SELECT * FROM descendants) combined
+		LIMIT 500`,
+		entityID, maxDepth,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("graph query: %w", err)
+	}
+	defer rows.Close()
+
+	nodeMap := make(map[string]*GraphNode)
+	for rows.Next() {
+		var (
+			n       GraphNode
+			metaRaw []byte
+			parents []string
+		)
+		if err := rows.Scan(&n.ID, &n.InstrumentID, &n.TraceID, &n.TimestampNs, &parents, &metaRaw); err != nil {
+			return nil, fmt.Errorf("scan: %w", err)
+		}
+		if parents == nil {
+			parents = []string{}
+		}
+		n.ParentIDs = parents
+		if err := json.Unmarshal(metaRaw, &n.Metadata); err != nil {
+			n.Metadata = map[string]string{}
+		}
+		nodeMap[n.ID] = &n
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("rows: %w", err)
+	}
+
+	if len(nodeMap) == 0 {
+		return nil, nil // entity not found
+	}
+
+	// Mark nodes that have helix.error events.
+	ids := make([]string, 0, len(nodeMap))
+	for id := range nodeMap {
+		ids = append(ids, id)
+	}
+	errRows, err := s.pool.Query(ctx,
+		`SELECT DISTINCT entity_id FROM entity_events
+		 WHERE entity_id = ANY($1) AND event_name = 'helix.error'`, ids)
+	if err != nil {
+		return nil, fmt.Errorf("error events query: %w", err)
+	}
+	defer errRows.Close()
+	for errRows.Next() {
+		var id string
+		if err := errRows.Scan(&id); err == nil {
+			if n, ok := nodeMap[id]; ok {
+				n.HasError = true
+			}
+		}
+	}
+
+	// Build edge list from parent_ids of nodes in the result set.
+	nodes := make([]GraphNode, 0, len(nodeMap))
+	var edges []GraphEdge
+	for _, n := range nodeMap {
+		nodes = append(nodes, *n)
+		for _, pid := range n.ParentIDs {
+			if _, ok := nodeMap[pid]; ok {
+				edges = append(edges, GraphEdge{Source: pid, Target: n.ID})
+			}
+		}
+	}
+	if edges == nil {
+		edges = []GraphEdge{}
+	}
+
+	return &EntityGraph{Nodes: nodes, Edges: edges}, nil
+}
+
 // WriteEntity upserts one entity row. Duplicate (id, instrument_id) pairs
 // are silently ignored — client retries on network failure may re-submit.
 func (s *Store) WriteEntity(ctx context.Context, e Entity) error {
