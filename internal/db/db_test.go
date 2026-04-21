@@ -2,10 +2,12 @@ package db_test
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"testing"
 
 	"github.com/HelixObs/gateway/internal/db"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // dbURL returns the TimescaleDB connection string for integration tests.
@@ -241,6 +243,51 @@ func TestQueryEntityGraph(t *testing.T) {
 	}
 	if g2 != nil {
 		t.Error("expected nil for non-existent entity, got non-nil")
+	}
+}
+
+func TestWriteEntityOperationPrunesOldRows(t *testing.T) {
+	store, err := db.New(context.Background(), dbURL(t))
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer store.Close()
+
+	entityID := "test-prune-entity"
+	_ = store.WriteEntity(context.Background(), db.Entity{
+		ID: entityID, InstrumentID: "TEST", TimestampNs: 1,
+	})
+
+	// Write 15 operations for the same (entity_id, operation) pair.
+	for i := range 15 {
+		op := db.EntityOperation{
+			EntityID:     entityID,
+			InstrumentID: "TEST",
+			Operation:    "retry-op",
+			TraceID:      fmt.Sprintf("trace%013d", i),
+			TimestampNs:  int64(i + 1),
+		}
+		if err := store.WriteEntityOperation(context.Background(), op); err != nil {
+			t.Fatalf("write %d: %v", i, err)
+		}
+	}
+
+	// Only the 10 most recent rows should remain — use a raw pool for the count query.
+	pool, err := pgxpool.New(context.Background(), dbURL(t))
+	if err != nil {
+		t.Fatalf("count pool: %v", err)
+	}
+	defer pool.Close()
+
+	var count int
+	if err := pool.QueryRow(context.Background(),
+		`SELECT COUNT(*) FROM entity_operations WHERE entity_id = $1 AND operation = $2`,
+		entityID, "retry-op",
+	).Scan(&count); err != nil {
+		t.Fatalf("count query: %v", err)
+	}
+	if count != 10 {
+		t.Errorf("expected 10 rows after pruning, got %d", count)
 	}
 }
 

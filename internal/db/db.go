@@ -210,11 +210,19 @@ func (s *Store) WriteEntity(ctx context.Context, e Entity) error {
 	return err
 }
 
+// maxOperationsPerPair is the maximum number of entity_operations rows retained
+// for a given (entity_id, operation) pair. When a new row pushes the count above
+// this limit the oldest rows are pruned so only the most recent attempts remain.
+const maxOperationsPerPair = 10
+
 // WriteEntityOperation inserts one entity_operation row.
 // If the target entity does not yet exist (e.g. the operation was submitted
 // before the creation span arrived, or the entity was never formally tracked),
 // a minimal placeholder entity row is created so the Entity Inspector always
 // has something to display.
+// After each insert, rows beyond maxOperationsPerPair for the same
+// (entity_id, operation) pair are deleted so high-retry scenarios do not
+// accumulate unbounded history — the most recent attempts are kept.
 func (s *Store) WriteEntityOperation(ctx context.Context, op EntityOperation) error {
 	meta, err := json.Marshal(op.Metadata)
 	if err != nil {
@@ -239,6 +247,26 @@ func (s *Store) WriteEntityOperation(ctx context.Context, op EntityOperation) er
 			(entity_id, instrument_id, operation, trace_id, timestamp_ns, metadata)
 		VALUES ($1, $2, $3, $4, $5, $6)`,
 		op.EntityID, op.InstrumentID, op.Operation, op.TraceID, op.TimestampNs, meta,
+	)
+	if err != nil {
+		return err
+	}
+
+	// Prune oldest rows beyond the retention limit for this (entity_id, operation) pair.
+	// The subquery returns the created_at of the Nth most recent row; anything older is deleted.
+	// If fewer than maxOperationsPerPair rows exist the subquery returns no rows and no
+	// deletion occurs.
+	_, err = s.pool.Exec(ctx, `
+		DELETE FROM entity_operations
+		WHERE entity_id = $1 AND operation = $2
+		  AND created_at < (
+		      SELECT created_at
+		      FROM entity_operations
+		      WHERE entity_id = $1 AND operation = $2
+		      ORDER BY created_at DESC
+		      LIMIT 1 OFFSET $3
+		  )`,
+		op.EntityID, op.Operation, maxOperationsPerPair-1,
 	)
 	return err
 }
