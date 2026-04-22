@@ -43,14 +43,14 @@ func run() error {
 	m := metrics.New(reg)
 
 	// ── TimescaleDB ───────────────────────────────────────────────────
-	dbStore, err := db.New(ctx, cfg.dbURL)
+	dbStore, err := db.New(ctx, cfg.dbURL, m)
 	if err != nil {
 		return fmt.Errorf("init db: %w", err)
 	}
 	defer dbStore.Close()
 
 	// ── Interceptor ───────────────────────────────────────────────────
-	traceStore := store.New(cfg.traceStoreSize)
+	traceStore := store.New(cfg.traceStoreSize, m)
 	icp := interceptor.New(traceStore, dbStore, m)
 
 	// ── OTLP receiver + downstream forwarder ──────────────────────────

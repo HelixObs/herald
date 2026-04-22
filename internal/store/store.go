@@ -16,6 +16,15 @@ type SpanRef struct {
 	SpanID  []byte
 }
 
+// storeMetrics is the subset of gateway metrics used by the trace store.
+// Using an interface keeps the store package free of an import cycle.
+type storeMetrics interface {
+	TraceStoreHit()
+	TraceStoreMiss()
+	TraceStoreEviction()
+	TraceStoreSetSize(n int)
+}
+
 // TraceStore is a thread-safe bounded FIFO map: entity_id → SpanRef.
 // When full the oldest entry is evicted to make room for the new one.
 type TraceStore struct {
@@ -23,12 +32,14 @@ type TraceStore struct {
 	entries map[string]*SpanRef
 	order   []string // insertion order for FIFO eviction
 	maxSize int
+	m       storeMetrics // nil in tests
 }
 
-func New(maxSize int) *TraceStore {
+func New(maxSize int, m storeMetrics) *TraceStore {
 	return &TraceStore{
 		entries: make(map[string]*SpanRef, maxSize),
 		maxSize: maxSize,
+		m:       m,
 	}
 }
 
@@ -41,14 +52,30 @@ func (s *TraceStore) Put(entityID string, ref *SpanRef) {
 			oldest := s.order[0]
 			s.order = s.order[1:]
 			delete(s.entries, oldest)
+			if s.m != nil {
+				s.m.TraceStoreEviction()
+			}
 		}
 		s.order = append(s.order, entityID)
 	}
 	s.entries[entityID] = ref
+
+	if s.m != nil {
+		s.m.TraceStoreSetSize(len(s.entries))
+	}
 }
 
 func (s *TraceStore) Get(entityID string) *SpanRef {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.entries[entityID]
+
+	ref := s.entries[entityID]
+	if s.m != nil {
+		if ref != nil {
+			s.m.TraceStoreHit()
+		} else {
+			s.m.TraceStoreMiss()
+		}
+	}
+	return ref
 }

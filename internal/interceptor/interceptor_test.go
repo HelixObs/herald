@@ -17,7 +17,7 @@ import (
 // newInterceptor builds an Interceptor with a fresh store + metrics registry.
 // db is nil — DB writes are skipped (nil-guarded in the interceptor).
 func newInterceptor() *interceptor.Interceptor {
-	s := store.New(1_000)
+	s := store.New(1_000, nil)
 	m := metrics.New(prometheus.NewRegistry())
 	return interceptor.New(s, nil, m)
 }

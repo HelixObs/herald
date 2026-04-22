@@ -9,6 +9,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -44,12 +45,19 @@ type EntityEvent struct {
 	Metadata     map[string]string
 }
 
+// dbMetrics is the subset of gateway metrics used by the DB store.
+type dbMetrics interface {
+	DBWriteRecord(table, status string, dur time.Duration)
+	DBPoolStats(inUse, total int)
+}
+
 // Store wraps a pgxpool.Pool with HelixObs-specific write methods.
 type Store struct {
 	pool *pgxpool.Pool
+	m    dbMetrics // nil in tests
 }
 
-func New(ctx context.Context, connStr string) (*Store, error) {
+func New(ctx context.Context, connStr string, m dbMetrics) (*Store, error) {
 	pool, err := pgxpool.New(ctx, connStr)
 	if err != nil {
 		return nil, fmt.Errorf("open pool: %w", err)
@@ -58,10 +66,23 @@ func New(ctx context.Context, connStr string) (*Store, error) {
 		pool.Close()
 		return nil, fmt.Errorf("ping db: %w", err)
 	}
-	return &Store{pool: pool}, nil
+	return &Store{pool: pool, m: m}, nil
 }
 
 func (s *Store) Close() { s.pool.Close() }
+
+func (s *Store) recordWrite(table string, err error, start time.Time) {
+	if s.m == nil {
+		return
+	}
+	status := "success"
+	if err != nil {
+		status = "failed"
+	}
+	s.m.DBWriteRecord(table, status, time.Since(start))
+	stat := s.pool.Stat()
+	s.m.DBPoolStats(int(stat.AcquiredConns()), int(stat.TotalConns()))
+}
 
 // GraphNode is one entity in a provenance graph response.
 type GraphNode struct {
@@ -213,6 +234,7 @@ func (s *Store) WriteEntity(ctx context.Context, e Entity) error {
 	if parentIDs == nil {
 		parentIDs = []string{}
 	}
+	start := time.Now()
 	_, err = s.pool.Exec(ctx, `
 		INSERT INTO entities
 			(id, instrument_id, trace_id, timestamp_ns, parent_ids, metadata)
@@ -223,6 +245,7 @@ func (s *Store) WriteEntity(ctx context.Context, e Entity) error {
 		)`,
 		e.ID, e.InstrumentID, e.TraceID, e.TimestampNs, parentIDs, meta,
 	)
+	s.recordWrite("entities", err, start)
 	return err
 }
 
@@ -271,12 +294,14 @@ func (s *Store) WriteEntityOperation(ctx context.Context, op EntityOperation) er
 		return nil // already processed, skip silently
 	}
 
+	start := time.Now()
 	_, err = s.pool.Exec(ctx, `
 		INSERT INTO entity_operations
 			(entity_id, instrument_id, operation, trace_id, timestamp_ns, metadata)
 		VALUES ($1, $2, $3, $4, $5, $6)`,
 		op.EntityID, op.InstrumentID, op.Operation, op.TraceID, op.TimestampNs, meta,
 	)
+	s.recordWrite("entity_operations", err, start)
 	if err != nil {
 		return err
 	}
@@ -306,11 +331,13 @@ func (s *Store) WriteEntityEvent(ctx context.Context, ev EntityEvent) error {
 	if err != nil {
 		return fmt.Errorf("marshal metadata: %w", err)
 	}
+	start := time.Now()
 	_, err = s.pool.Exec(ctx, `
 		INSERT INTO entity_events
 			(instrument_id, entity_id, event_name, timestamp_ns, metadata)
 		VALUES ($1, $2, $3, $4, $5)`,
 		ev.InstrumentID, ev.EntityID, ev.EventName, ev.TimestampNs, meta,
 	)
+	s.recordWrite("entity_events", err, start)
 	return err
 }

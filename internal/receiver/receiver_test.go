@@ -58,7 +58,7 @@ func (m *mockCollector) last() *collectortracepb.ExportTraceServiceRequest {
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 func newReceiver(col *mockCollector) *receiver.Receiver {
-	s := store.New(1_000)
+	s := store.New(1_000, nil)
 	m := metrics.New(prometheus.NewRegistry())
 	icp := interceptor.New(s, nil, m)
 	return receiver.New(icp, col)

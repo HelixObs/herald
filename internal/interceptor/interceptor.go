@@ -22,6 +22,7 @@ import (
 	"log/slog"
 	"strconv"
 	"strings"
+	"time"
 
 	collectortracepb "go.opentelemetry.io/proto/otlp/collector/trace/v1"
 	commonpb "go.opentelemetry.io/proto/otlp/common/v1"
@@ -66,10 +67,18 @@ func (icp *Interceptor) Process(req *collectortracepb.ExportTraceServiceRequest)
 }
 
 func (icp *Interceptor) processSpan(span *tracepb.Span) {
+	icp.metrics.SpansReceivedTotal.Inc()
+	start := time.Now()
+
 	entityID := attrStr(span.Attributes, attrEntityID)
 	if entityID == "" {
+		icp.metrics.SpansPassthroughTotal.Inc()
 		return // not a HelixObs span; pass through unchanged
 	}
+	defer func() {
+		instrumentID := attrStr(span.Attributes, attrInstrumentID)
+		icp.metrics.SpanProcessingDuration.WithLabelValues(instrumentID).Observe(time.Since(start).Seconds())
+	}()
 
 	instrumentID := attrStr(span.Attributes, attrInstrumentID)
 	parentIDsStr := attrStr(span.Attributes, attrParentIDs)
@@ -91,7 +100,9 @@ func (icp *Interceptor) processSpan(span *tracepb.Span) {
 					TraceId: ref.TraceID,
 					SpanId:  ref.SpanID,
 				})
+				icp.metrics.ParentResolutionTotal.WithLabelValues(instrumentID, "success").Inc()
 			} else {
+				icp.metrics.ParentResolutionTotal.WithLabelValues(instrumentID, "failed").Inc()
 				icp.metrics.ParentResolutionFailedTotal.WithLabelValues(instrumentID).Inc()
 			}
 		}

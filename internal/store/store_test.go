@@ -16,7 +16,7 @@ func ref(traceID, spanID byte) *store.SpanRef {
 }
 
 func TestPutAndGet(t *testing.T) {
-	s := store.New(10)
+	s := store.New(10, nil)
 	s.Put("entity-1", ref(1, 1))
 	got := s.Get("entity-1")
 	if got == nil {
@@ -28,14 +28,14 @@ func TestPutAndGet(t *testing.T) {
 }
 
 func TestGetMissingReturnsNil(t *testing.T) {
-	s := store.New(10)
+	s := store.New(10, nil)
 	if s.Get("nonexistent") != nil {
 		t.Fatal("expected nil for missing key")
 	}
 }
 
 func TestOverwrite(t *testing.T) {
-	s := store.New(10)
+	s := store.New(10, nil)
 	s.Put("entity-1", ref(1, 1))
 	s.Put("entity-1", ref(2, 2))
 	got := s.Get("entity-1")
@@ -45,7 +45,7 @@ func TestOverwrite(t *testing.T) {
 }
 
 func TestMaxSizeEvictsOldest(t *testing.T) {
-	s := store.New(3)
+	s := store.New(3, nil)
 	for i := 0; i < 3; i++ {
 		s.Put(fmt.Sprintf("entity-%d", i), ref(byte(i), byte(i)))
 	}
@@ -60,7 +60,7 @@ func TestMaxSizeEvictsOldest(t *testing.T) {
 }
 
 func TestMaxSizeRetainsMostRecent(t *testing.T) {
-	s := store.New(3)
+	s := store.New(3, nil)
 	for i := 0; i < 5; i++ {
 		s.Put(fmt.Sprintf("entity-%d", i), ref(byte(i), byte(i)))
 	}
@@ -72,7 +72,7 @@ func TestMaxSizeRetainsMostRecent(t *testing.T) {
 }
 
 func TestConcurrentPuts(t *testing.T) {
-	s := store.New(1_000)
+	s := store.New(1_000, nil)
 	var wg sync.WaitGroup
 	for g := 0; g < 10; g++ {
 		g := g
@@ -88,7 +88,7 @@ func TestConcurrentPuts(t *testing.T) {
 }
 
 func TestConcurrentPutsAndGets(t *testing.T) {
-	s := store.New(1_000)
+	s := store.New(1_000, nil)
 	s.Put("shared", ref(99, 99))
 	var wg sync.WaitGroup
 	for i := 0; i < 5; i++ {

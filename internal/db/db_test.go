@@ -24,7 +24,7 @@ func dbURL(t *testing.T) string {
 // ── New() ─────────────────────────────────────────────────────────────────────
 
 func TestNewInvalidConnStringReturnsError(t *testing.T) {
-	_, err := db.New(context.Background(), "not-a-valid-dsn://???")
+	_, err := db.New(context.Background(), "not-a-valid-dsn://???", nil)
 	if err == nil {
 		t.Fatal("expected error for invalid DSN, got nil")
 	}
@@ -32,7 +32,7 @@ func TestNewInvalidConnStringReturnsError(t *testing.T) {
 
 func TestNewUnreachableHostReturnsError(t *testing.T) {
 	// 192.0.2.0/24 is TEST-NET — guaranteed unreachable.
-	_, err := db.New(context.Background(), "postgres://u:p@192.0.2.1:5432/db?connect_timeout=1")
+	_, err := db.New(context.Background(), "postgres://u:p@192.0.2.1:5432/db?connect_timeout=1", nil)
 	if err == nil {
 		t.Fatal("expected error for unreachable host, got nil")
 	}
@@ -41,7 +41,7 @@ func TestNewUnreachableHostReturnsError(t *testing.T) {
 // ── Integration tests (require TEST_DB_URL) ───────────────────────────────────
 
 func TestWriteEntityRoundTrip(t *testing.T) {
-	store, err := db.New(context.Background(), dbURL(t))
+	store, err := db.New(context.Background(), dbURL(t), nil)
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
@@ -61,7 +61,7 @@ func TestWriteEntityRoundTrip(t *testing.T) {
 }
 
 func TestWriteEntityIdempotent(t *testing.T) {
-	store, err := db.New(context.Background(), dbURL(t))
+	store, err := db.New(context.Background(), dbURL(t), nil)
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
@@ -82,7 +82,7 @@ func TestWriteEntityIdempotent(t *testing.T) {
 }
 
 func TestWriteEntityEventRoundTrip(t *testing.T) {
-	store, err := db.New(context.Background(), dbURL(t))
+	store, err := db.New(context.Background(), dbURL(t), nil)
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
@@ -106,7 +106,7 @@ func TestWriteEntityEventRoundTrip(t *testing.T) {
 }
 
 func TestWriteEntityNilMetadata(t *testing.T) {
-	store, err := db.New(context.Background(), dbURL(t))
+	store, err := db.New(context.Background(), dbURL(t), nil)
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
@@ -124,7 +124,7 @@ func TestWriteEntityNilMetadata(t *testing.T) {
 }
 
 func TestWriteEntityOperationRoundTrip(t *testing.T) {
-	store, err := db.New(context.Background(), dbURL(t))
+	store, err := db.New(context.Background(), dbURL(t), nil)
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
@@ -149,7 +149,7 @@ func TestWriteEntityOperationRoundTrip(t *testing.T) {
 }
 
 func TestWriteEntityOperationCreatesPlaceholderEntity(t *testing.T) {
-	store, err := db.New(context.Background(), dbURL(t))
+	store, err := db.New(context.Background(), dbURL(t), nil)
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
@@ -185,7 +185,7 @@ func TestWriteEntityOperationCreatesPlaceholderEntity(t *testing.T) {
 }
 
 func TestQueryEntityGraph(t *testing.T) {
-	store, err := db.New(context.Background(), dbURL(t))
+	store, err := db.New(context.Background(), dbURL(t), nil)
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
@@ -247,7 +247,7 @@ func TestQueryEntityGraph(t *testing.T) {
 }
 
 func TestWriteEntityOperationPrunesOldRows(t *testing.T) {
-	store, err := db.New(context.Background(), dbURL(t))
+	store, err := db.New(context.Background(), dbURL(t), nil)
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
@@ -292,7 +292,7 @@ func TestWriteEntityOperationPrunesOldRows(t *testing.T) {
 }
 
 func TestWriteEntityOperationNilMetadata(t *testing.T) {
-	store, err := db.New(context.Background(), dbURL(t))
+	store, err := db.New(context.Background(), dbURL(t), nil)
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
