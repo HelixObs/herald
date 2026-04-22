@@ -241,7 +241,7 @@ func (s *Store) WriteEntity(ctx context.Context, e Entity) error {
 		SELECT $1, $2, $3, $4, $5, $6
 		WHERE NOT EXISTS (
 			SELECT 1 FROM entities WHERE id = $1 AND instrument_id = $2
-				AND array_length(parent_ids, 1) > 0
+			AND (cardinality(parent_ids) > 0 OR cardinality($5::text[]) = 0)
 		)`,
 		e.ID, e.InstrumentID, e.TraceID, e.TimestampNs, parentIDs, meta,
 	)
