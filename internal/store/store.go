@@ -7,7 +7,10 @@
 // attribute remains on the span for Grafana provenance queries.
 package store
 
-import "sync"
+import (
+	"sync"
+	"time"
+)
 
 // SpanRef is the minimal context needed to construct an OTel span link.
 // TraceID is 16 bytes; SpanID is 8 bytes — matching the OTLP proto wire format.
@@ -23,6 +26,7 @@ type storeMetrics interface {
 	TraceStoreMiss()
 	TraceStoreEviction()
 	TraceStoreSetSize(n int)
+	RecordTraceStoreLookup(d time.Duration)
 }
 
 // TraceStore is a thread-safe bounded FIFO map: entity_id → SpanRef.
@@ -66,6 +70,7 @@ func (s *TraceStore) Put(entityID string, ref *SpanRef) {
 }
 
 func (s *TraceStore) Get(entityID string) *SpanRef {
+	start := time.Now()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -76,6 +81,7 @@ func (s *TraceStore) Get(entityID string) *SpanRef {
 		} else {
 			s.m.TraceStoreMiss()
 		}
+		s.m.RecordTraceStoreLookup(time.Since(start))
 	}
 	return ref
 }

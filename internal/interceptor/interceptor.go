@@ -94,6 +94,7 @@ func (icp *Interceptor) processSpan(span *tracepb.Span) {
 			}
 			parentIDs = append(parentIDs, pid)
 
+			resStart := time.Now()
 			ref := icp.store.Get(pid)
 			if ref != nil {
 				span.Links = append(span.Links, &tracepb.Span_Link{
@@ -105,6 +106,7 @@ func (icp *Interceptor) processSpan(span *tracepb.Span) {
 				icp.metrics.ParentResolutionTotal.WithLabelValues(instrumentID, "failed").Inc()
 				icp.metrics.ParentResolutionFailedTotal.WithLabelValues(instrumentID).Inc()
 			}
+			icp.metrics.ParentResolutionDuration.WithLabelValues(instrumentID).Observe(time.Since(resStart).Seconds())
 		}
 	}
 

@@ -69,6 +69,16 @@ type Metrics struct {
 
 	// DBConnectionsTotal is the total pool size.
 	DBConnectionsTotal prometheus.Gauge
+
+	// ── Parent resolution latency ─────────────────────────────────────
+
+	// ParentResolutionDuration measures per-parent resolution latency.
+	ParentResolutionDuration *prometheus.HistogramVec
+
+	// ── Trace store lookup latency ────────────────────────────────────
+
+	// TraceStoreLookupDuration measures Get() latency (map lookup under mutex).
+	TraceStoreLookupDuration prometheus.Histogram
 }
 
 // New registers all metrics with reg and returns a Metrics instance.
@@ -162,6 +172,18 @@ func New(reg prometheus.Registerer) *Metrics {
 			Name: "helix_db_connections_total",
 			Help: "DB connection pool total size.",
 		}),
+
+		ParentResolutionDuration: prometheus.NewHistogramVec(prometheus.HistogramOpts{
+			Name:    "helix_parent_resolution_latency_seconds",
+			Help:    "Time to resolve one parent entity ID to a span link.",
+			Buckets: []float64{.000001, .000005, .00001, .00005, .0001, .0005, .001, .005},
+		}, []string{"instrument_id"}),
+
+		TraceStoreLookupDuration: prometheus.NewHistogram(prometheus.HistogramOpts{
+			Name:    "helix_trace_store_lookup_duration_seconds",
+			Help:    "Trace store Get() latency (map lookup under mutex).",
+			Buckets: []float64{.0000001, .0000005, .000001, .000005, .00001, .00005, .0001},
+		}),
 	}
 
 	reg.MustRegister(
@@ -173,10 +195,12 @@ func New(reg prometheus.Registerer) *Metrics {
 		m.EventsTotal,
 		m.ParentResolutionTotal,
 		m.ParentResolutionFailedTotal,
+		m.ParentResolutionDuration,
 		m.TraceStoreSize,
 		m.TraceStoreHitsTotal,
 		m.TraceStoreMissesTotal,
 		m.TraceStoreEvictionsTotal,
+		m.TraceStoreLookupDuration,
 		m.DBWritesTotal,
 		m.DBWriteDuration,
 		m.DBWriteErrorsTotal,
@@ -190,10 +214,11 @@ func New(reg prometheus.Registerer) *Metrics {
 // These satisfy the storeMetrics and dbMetrics interfaces in their respective
 // packages without creating import cycles.
 
-func (m *Metrics) TraceStoreHit()            { m.TraceStoreHitsTotal.Inc() }
-func (m *Metrics) TraceStoreMiss()           { m.TraceStoreMissesTotal.Inc() }
-func (m *Metrics) TraceStoreEviction()       { m.TraceStoreEvictionsTotal.Inc() }
-func (m *Metrics) TraceStoreSetSize(n int)   { m.TraceStoreSize.Set(float64(n)) }
+func (m *Metrics) TraceStoreHit()                        { m.TraceStoreHitsTotal.Inc() }
+func (m *Metrics) TraceStoreMiss()                       { m.TraceStoreMissesTotal.Inc() }
+func (m *Metrics) TraceStoreEviction()                   { m.TraceStoreEvictionsTotal.Inc() }
+func (m *Metrics) TraceStoreSetSize(n int)               { m.TraceStoreSize.Set(float64(n)) }
+func (m *Metrics) RecordTraceStoreLookup(d time.Duration) { m.TraceStoreLookupDuration.Observe(d.Seconds()) }
 
 func (m *Metrics) DBWriteRecord(table, status string, dur time.Duration) {
 	m.DBWritesTotal.WithLabelValues(table, status).Inc()
