@@ -91,23 +91,34 @@ type EntityGraph struct {
 // Nodes are de-duplicated; edges are derived from parent_ids relationships.
 func (s *Store) QueryEntityGraph(ctx context.Context, entityID string, maxDepth int) (*EntityGraph, error) {
 	rows, err := s.pool.Query(ctx, `
-		WITH RECURSIVE ancestors AS (
-			SELECT id, instrument_id, trace_id, timestamp_ns, parent_ids, metadata, 0 AS depth
+		WITH RECURSIVE deduped AS (
+			-- Pick the most informative row per entity when the race between
+			-- WriteEntity and WriteEntityOperation produces duplicates.
+			SELECT DISTINCT ON (id)
+				id, instrument_id, trace_id, timestamp_ns, parent_ids, metadata
 			FROM entities
+			ORDER BY id,
+				array_length(parent_ids, 1) DESC NULLS LAST,
+				trace_id NULLS LAST,
+				created_at ASC
+		),
+		ancestors AS (
+			SELECT id, instrument_id, trace_id, timestamp_ns, parent_ids, metadata, 0 AS depth
+			FROM deduped
 			WHERE id = $1
 			UNION
 			SELECT e.id, e.instrument_id, e.trace_id, e.timestamp_ns, e.parent_ids, e.metadata, a.depth + 1
-			FROM entities e
+			FROM deduped e
 			INNER JOIN ancestors a ON e.id = ANY(a.parent_ids)
 			WHERE a.depth < $2
 		),
 		descendants AS (
 			SELECT id, instrument_id, trace_id, timestamp_ns, parent_ids, metadata, 0 AS depth
-			FROM entities
+			FROM deduped
 			WHERE id = $1
 			UNION
 			SELECT e.id, e.instrument_id, e.trace_id, e.timestamp_ns, e.parent_ids, e.metadata, d.depth + 1
-			FROM entities e
+			FROM deduped e
 			INNER JOIN descendants d ON d.id = ANY(e.parent_ids)
 			WHERE d.depth < 2
 		)
@@ -138,7 +149,11 @@ func (s *Store) QueryEntityGraph(ctx context.Context, entityID string, maxDepth 
 		if err := json.Unmarshal(metaRaw, &n.Metadata); err != nil {
 			n.Metadata = map[string]string{}
 		}
-		nodeMap[n.ID] = &n
+		if existing, ok := nodeMap[n.ID]; !ok ||
+			len(n.ParentIDs) > len(existing.ParentIDs) ||
+			(n.TraceID != "" && existing.TraceID == "") {
+			nodeMap[n.ID] = &n
+		}
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("rows: %w", err)
@@ -204,6 +219,7 @@ func (s *Store) WriteEntity(ctx context.Context, e Entity) error {
 		SELECT $1, $2, $3, $4, $5, $6
 		WHERE NOT EXISTS (
 			SELECT 1 FROM entities WHERE id = $1 AND instrument_id = $2
+				AND array_length(parent_ids, 1) > 0
 		)`,
 		e.ID, e.InstrumentID, e.TraceID, e.TimestampNs, parentIDs, meta,
 	)
@@ -240,6 +256,19 @@ func (s *Store) WriteEntityOperation(ctx context.Context, op EntityOperation) er
 	)
 	if err != nil {
 		return fmt.Errorf("ensure entity: %w", err)
+	}
+
+	// Atomic dedup: claim the trace_id in the seen-set first.
+	// ON CONFLICT DO NOTHING on a regular PRIMARY KEY is atomic — no race window.
+	tag, err := s.pool.Exec(ctx,
+		`INSERT INTO operation_trace_seen (trace_id) VALUES ($1) ON CONFLICT DO NOTHING`,
+		op.TraceID,
+	)
+	if err != nil {
+		return fmt.Errorf("trace dedup: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return nil // already processed, skip silently
 	}
 
 	_, err = s.pool.Exec(ctx, `
