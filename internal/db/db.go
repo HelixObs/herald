@@ -130,14 +130,19 @@ func (s *Store) QueryEntityGraph(ctx context.Context, entityID string, maxDepth 
 	rows, err := s.pool.Query(ctx, `
 		WITH RECURSIVE
 		ancestors(id, instrument_id, trace_id, timestamp_ns, parent_ids, metadata, depth) AS (
-			SELECT DISTINCT ON (id)
-				id, instrument_id, trace_id, timestamp_ns, parent_ids, metadata, 0
-			FROM entities
-			WHERE id = $1
-			ORDER BY id,
-				array_length(parent_ids, 1) DESC NULLS LAST,
-				trace_id NULLS LAST,
-				created_at ASC
+			-- Subquery isolates DISTINCT ON + ORDER BY from the UNION so PostgreSQL
+			-- does not misparse the ORDER BY as applying to the whole recursive query.
+			SELECT id, instrument_id, trace_id, timestamp_ns, parent_ids, metadata, 0
+			FROM (
+				SELECT DISTINCT ON (id)
+					id, instrument_id, trace_id, timestamp_ns, parent_ids, metadata
+				FROM entities
+				WHERE id = $1
+				ORDER BY id,
+					array_length(parent_ids, 1) DESC NULLS LAST,
+					trace_id NULLS LAST,
+					created_at ASC
+			) t
 			UNION
 			SELECT e.id, e.instrument_id, e.trace_id, e.timestamp_ns, e.parent_ids, e.metadata, a.depth + 1
 			FROM entities e
@@ -145,14 +150,17 @@ func (s *Store) QueryEntityGraph(ctx context.Context, entityID string, maxDepth 
 			WHERE a.depth < $2
 		),
 		descendants(id, instrument_id, trace_id, timestamp_ns, parent_ids, metadata, depth) AS (
-			SELECT DISTINCT ON (id)
-				id, instrument_id, trace_id, timestamp_ns, parent_ids, metadata, 0
-			FROM entities
-			WHERE id = $1
-			ORDER BY id,
-				array_length(parent_ids, 1) DESC NULLS LAST,
-				trace_id NULLS LAST,
-				created_at ASC
+			SELECT id, instrument_id, trace_id, timestamp_ns, parent_ids, metadata, 0
+			FROM (
+				SELECT DISTINCT ON (id)
+					id, instrument_id, trace_id, timestamp_ns, parent_ids, metadata
+				FROM entities
+				WHERE id = $1
+				ORDER BY id,
+					array_length(parent_ids, 1) DESC NULLS LAST,
+					trace_id NULLS LAST,
+					created_at ASC
+			) t
 			UNION
 			SELECT e.id, e.instrument_id, e.trace_id, e.timestamp_ns, e.parent_ids, e.metadata, d.depth + 1
 			FROM entities e
