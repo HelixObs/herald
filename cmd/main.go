@@ -82,7 +82,7 @@ func run() error {
 	}()
 
 	// ── API HTTP ──────────────────────────────────────────────────────
-	apiSrv := &http.Server{Addr: cfg.apiAddr, Handler: api.New(dbStore, m)}
+	apiSrv := &http.Server{Addr: cfg.apiAddr, Handler: api.New(dbStore, dbStore, m)}
 	go func() {
 		slog.Info("api listening", "addr", cfg.apiAddr)
 		if err := apiSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {

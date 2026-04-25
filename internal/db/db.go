@@ -345,6 +345,62 @@ func (s *Store) WriteEntityOperation(ctx context.Context, op EntityOperation) er
 	return err
 }
 
+// RawEntityRow is one entity row with its full metadata — used by the monitor binning API.
+type RawEntityRow struct {
+	ID          string
+	TimestampNs int64
+	Metadata    map[string]string
+}
+
+// QueryEntitiesRaw fetches entities for one instrument within [fromNs, toNs].
+// metaFilter is a validated SQL fragment (e.g. "metadata ? 'key1' AND metadata ? 'key2'")
+// injected into the WHERE clause after key validation in the monitor package.
+// TimescaleDB chunk pruning fires on created_at, so a 1-minute buffer is applied
+// around the nanosecond window to avoid missing rows whose created_at slightly leads
+// their timestamp_ns.
+func (s *Store) QueryEntitiesRaw(ctx context.Context, instrument string, fromNs, toNs int64, metaFilter string) ([]RawEntityRow, error) {
+	const bufNs = 60_000_000_000 // 1 minute buffer for TimescaleDB chunk pruning
+	fromTime := time.Unix(0, fromNs-bufNs)
+	toTime := time.Unix(0, toNs+bufNs)
+
+	q := `SELECT DISTINCT ON (id) id, timestamp_ns, metadata
+		FROM entities
+		WHERE instrument_id = $1
+		  AND created_at BETWEEN $2 AND $3
+		  AND timestamp_ns BETWEEN $4 AND $5`
+	if metaFilter != "" {
+		q += " AND " + metaFilter
+	}
+	q += " ORDER BY id, created_at ASC"
+
+	start := time.Now()
+	rows, err := s.pool.Query(ctx, q, instrument, fromTime, toTime, fromNs, toNs)
+	s.recordQuery("entities_raw", err, start)
+	if err != nil {
+		return nil, fmt.Errorf("query entities raw: %w", err)
+	}
+	defer rows.Close()
+
+	var result []RawEntityRow
+	for rows.Next() {
+		var (
+			row     RawEntityRow
+			metaRaw []byte
+		)
+		if err := rows.Scan(&row.ID, &row.TimestampNs, &metaRaw); err != nil {
+			return nil, fmt.Errorf("scan: %w", err)
+		}
+		if err := json.Unmarshal(metaRaw, &row.Metadata); err != nil {
+			row.Metadata = map[string]string{}
+		}
+		result = append(result, row)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("rows: %w", err)
+	}
+	return result, nil
+}
+
 // WriteEntityEvent inserts one entity_event row.
 func (s *Store) WriteEntityEvent(ctx context.Context, ev EntityEvent) error {
 	meta, err := json.Marshal(ev.Metadata)
