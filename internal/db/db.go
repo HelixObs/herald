@@ -111,40 +111,59 @@ type EntityGraph struct {
 // up to maxDepth levels and direct descendants one level down.
 // Nodes are de-duplicated; edges are derived from parent_ids relationships.
 func (s *Store) QueryEntityGraph(ctx context.Context, entityID string, maxDepth int) (*EntityGraph, error) {
+	// Anchor each CTE on WHERE id = $1 so dedup only touches the specific
+	// entity's rows (uses idx_entities_id) rather than scanning the whole table.
+	// Error flag is folded into the main query to eliminate a second round-trip.
 	rows, err := s.pool.Query(ctx, `
-		WITH RECURSIVE deduped AS (
-			-- Pick the most informative row per entity when the race between
-			-- WriteEntity and WriteEntityOperation produces duplicates.
+		WITH RECURSIVE
+		ancestors(id, instrument_id, trace_id, timestamp_ns, parent_ids, metadata, depth) AS (
 			SELECT DISTINCT ON (id)
-				id, instrument_id, trace_id, timestamp_ns, parent_ids, metadata
+				id, instrument_id, trace_id, timestamp_ns, parent_ids, metadata, 0
 			FROM entities
+			WHERE id = $1
 			ORDER BY id,
 				array_length(parent_ids, 1) DESC NULLS LAST,
 				trace_id NULLS LAST,
 				created_at ASC
-		),
-		ancestors AS (
-			SELECT id, instrument_id, trace_id, timestamp_ns, parent_ids, metadata, 0 AS depth
-			FROM deduped
-			WHERE id = $1
 			UNION
 			SELECT e.id, e.instrument_id, e.trace_id, e.timestamp_ns, e.parent_ids, e.metadata, a.depth + 1
-			FROM deduped e
+			FROM entities e
 			INNER JOIN ancestors a ON e.id = ANY(a.parent_ids)
 			WHERE a.depth < $2
 		),
-		descendants AS (
-			SELECT id, instrument_id, trace_id, timestamp_ns, parent_ids, metadata, 0 AS depth
-			FROM deduped
+		descendants(id, instrument_id, trace_id, timestamp_ns, parent_ids, metadata, depth) AS (
+			SELECT DISTINCT ON (id)
+				id, instrument_id, trace_id, timestamp_ns, parent_ids, metadata, 0
+			FROM entities
 			WHERE id = $1
+			ORDER BY id,
+				array_length(parent_ids, 1) DESC NULLS LAST,
+				trace_id NULLS LAST,
+				created_at ASC
 			UNION
 			SELECT e.id, e.instrument_id, e.trace_id, e.timestamp_ns, e.parent_ids, e.metadata, d.depth + 1
-			FROM deduped e
+			FROM entities e
 			INNER JOIN descendants d ON d.id = ANY(e.parent_ids)
 			WHERE d.depth < 2
 		)
-		SELECT DISTINCT id, instrument_id, COALESCE(trace_id, ''), timestamp_ns, parent_ids, metadata
-		FROM (SELECT * FROM ancestors UNION SELECT * FROM descendants) combined
+		SELECT
+			c.id,
+			c.instrument_id,
+			COALESCE(c.trace_id, '') AS trace_id,
+			c.timestamp_ns,
+			c.parent_ids,
+			c.metadata,
+			EXISTS(
+				SELECT 1 FROM entity_events ee
+				WHERE ee.entity_id = c.id AND ee.event_name = 'helix.error'
+			) AS has_error
+		FROM (
+			SELECT id, instrument_id, trace_id, timestamp_ns, parent_ids, metadata
+			FROM ancestors
+			UNION
+			SELECT id, instrument_id, trace_id, timestamp_ns, parent_ids, metadata
+			FROM descendants
+		) c
 		LIMIT 500`,
 		entityID, maxDepth,
 	)
@@ -160,7 +179,7 @@ func (s *Store) QueryEntityGraph(ctx context.Context, entityID string, maxDepth 
 			metaRaw []byte
 			parents []string
 		)
-		if err := rows.Scan(&n.ID, &n.InstrumentID, &n.TraceID, &n.TimestampNs, &parents, &metaRaw); err != nil {
+		if err := rows.Scan(&n.ID, &n.InstrumentID, &n.TraceID, &n.TimestampNs, &parents, &metaRaw, &n.HasError); err != nil {
 			return nil, fmt.Errorf("scan: %w", err)
 		}
 		if parents == nil {
@@ -182,27 +201,6 @@ func (s *Store) QueryEntityGraph(ctx context.Context, entityID string, maxDepth 
 
 	if len(nodeMap) == 0 {
 		return nil, nil // entity not found
-	}
-
-	// Mark nodes that have helix.error events.
-	ids := make([]string, 0, len(nodeMap))
-	for id := range nodeMap {
-		ids = append(ids, id)
-	}
-	errRows, err := s.pool.Query(ctx,
-		`SELECT DISTINCT entity_id FROM entity_events
-		 WHERE entity_id = ANY($1) AND event_name = 'helix.error'`, ids)
-	if err != nil {
-		return nil, fmt.Errorf("error events query: %w", err)
-	}
-	defer errRows.Close()
-	for errRows.Next() {
-		var id string
-		if err := errRows.Scan(&id); err == nil {
-			if n, ok := nodeMap[id]; ok {
-				n.HasError = true
-			}
-		}
 	}
 
 	// Build edge list from parent_ids of nodes in the result set.
