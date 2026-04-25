@@ -25,7 +25,7 @@ func (m *mockQuerier) QueryEntityGraph(_ context.Context, _ string, _ int) (*db.
 
 func TestEntityGraphRouting(t *testing.T) {
 	// Unregistered routes return 404 from the mux — no DB needed.
-	h := api.New(nil)
+	h := api.New(nil, nil)
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/entity/", nil)
 	h.ServeHTTP(rec, req)
@@ -35,7 +35,7 @@ func TestEntityGraphRouting(t *testing.T) {
 }
 
 func TestEntityGraphNotFound(t *testing.T) {
-	h := api.New(&mockQuerier{graph: nil, err: nil})
+	h := api.New(&mockQuerier{graph: nil, err: nil}, nil)
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/entity/unknown/graph", nil)
 	h.ServeHTTP(rec, req)
@@ -54,7 +54,7 @@ func TestEntityGraphOK(t *testing.T) {
 		}},
 		Edges: []db.GraphEdge{{Source: "cand-1", Target: "frb-1"}},
 	}
-	h := api.New(&mockQuerier{graph: g})
+	h := api.New(&mockQuerier{graph: g}, nil)
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/entity/frb-1/graph", nil)
 	h.ServeHTTP(rec, req)
@@ -79,7 +79,7 @@ func TestEntityGraphOK(t *testing.T) {
 }
 
 func TestEntityGraphDBError(t *testing.T) {
-	h := api.New(&mockQuerier{err: errors.New("db failure")})
+	h := api.New(&mockQuerier{err: errors.New("db failure")}, nil)
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/entity/any/graph", nil)
 	h.ServeHTTP(rec, req)
@@ -90,7 +90,7 @@ func TestEntityGraphDBError(t *testing.T) {
 
 func TestEntityGraphCORSHeader(t *testing.T) {
 	g := &db.EntityGraph{Nodes: []db.GraphNode{}, Edges: []db.GraphEdge{}}
-	h := api.New(&mockQuerier{graph: g})
+	h := api.New(&mockQuerier{graph: g}, nil)
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/entity/x/graph", nil)
 	h.ServeHTTP(rec, req)

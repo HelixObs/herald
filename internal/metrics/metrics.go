@@ -79,6 +79,22 @@ type Metrics struct {
 
 	// TraceStoreLookupDuration measures Get() latency (map lookup under mutex).
 	TraceStoreLookupDuration prometheus.Histogram
+
+	// ── TimescaleDB reads ─────────────────────────────────────────────
+
+	// DBQueriesTotal counts read attempts by query name and outcome.
+	DBQueriesTotal *prometheus.CounterVec
+
+	// DBQueryDuration measures read latency per named query.
+	DBQueryDuration *prometheus.HistogramVec
+
+	// ── HTTP API ──────────────────────────────────────────────────────
+
+	// APIRequestsTotal counts API requests by handler and HTTP status class.
+	APIRequestsTotal *prometheus.CounterVec
+
+	// APIRequestDuration measures end-to-end HTTP handler latency.
+	APIRequestDuration *prometheus.HistogramVec
 }
 
 // New registers all metrics with reg and returns a Metrics instance.
@@ -184,6 +200,28 @@ func New(reg prometheus.Registerer) *Metrics {
 			Help:    "Trace store Get() latency (map lookup under mutex).",
 			Buckets: []float64{.0000001, .0000005, .000001, .000005, .00001, .00005, .0001},
 		}),
+
+		DBQueriesTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "helix_db_queries_total",
+			Help: "TimescaleDB read attempts by query name and outcome.",
+		}, []string{"query", "status"}),
+
+		DBQueryDuration: prometheus.NewHistogramVec(prometheus.HistogramOpts{
+			Name:    "helix_db_query_duration_seconds",
+			Help:    "TimescaleDB read latency per named query.",
+			Buckets: []float64{.001, .005, .01, .025, .05, .1, .25, .5, 1, 2.5},
+		}, []string{"query"}),
+
+		APIRequestsTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "helix_api_requests_total",
+			Help: "HTTP API requests by handler and status.",
+		}, []string{"handler", "status"}),
+
+		APIRequestDuration: prometheus.NewHistogramVec(prometheus.HistogramOpts{
+			Name:    "helix_api_request_duration_seconds",
+			Help:    "HTTP API end-to-end handler latency.",
+			Buckets: []float64{.005, .01, .025, .05, .1, .25, .5, 1, 2.5, 5},
+		}, []string{"handler"}),
 	}
 
 	reg.MustRegister(
@@ -206,6 +244,10 @@ func New(reg prometheus.Registerer) *Metrics {
 		m.DBWriteErrorsTotal,
 		m.DBConnectionsInUse,
 		m.DBConnectionsTotal,
+		m.DBQueriesTotal,
+		m.DBQueryDuration,
+		m.APIRequestsTotal,
+		m.APIRequestDuration,
 	)
 	return m
 }
@@ -231,4 +273,14 @@ func (m *Metrics) DBWriteRecord(table, status string, dur time.Duration) {
 func (m *Metrics) DBPoolStats(inUse, total int) {
 	m.DBConnectionsInUse.Set(float64(inUse))
 	m.DBConnectionsTotal.Set(float64(total))
+}
+
+func (m *Metrics) DBQueryRecord(query, status string, dur time.Duration) {
+	m.DBQueriesTotal.WithLabelValues(query, status).Inc()
+	m.DBQueryDuration.WithLabelValues(query).Observe(dur.Seconds())
+}
+
+func (m *Metrics) APIRequestRecord(handler, status string, dur time.Duration) {
+	m.APIRequestsTotal.WithLabelValues(handler, status).Inc()
+	m.APIRequestDuration.WithLabelValues(handler).Observe(dur.Seconds())
 }

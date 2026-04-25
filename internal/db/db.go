@@ -48,6 +48,7 @@ type EntityEvent struct {
 // dbMetrics is the subset of gateway metrics used by the DB store.
 type dbMetrics interface {
 	DBWriteRecord(table, status string, dur time.Duration)
+	DBQueryRecord(query, status string, dur time.Duration)
 	DBPoolStats(inUse, total int)
 }
 
@@ -84,6 +85,17 @@ func (s *Store) recordWrite(table string, err error, start time.Time) {
 	s.m.DBPoolStats(int(stat.AcquiredConns()), int(stat.TotalConns()))
 }
 
+func (s *Store) recordQuery(query string, err error, start time.Time) {
+	if s.m == nil {
+		return
+	}
+	status := "success"
+	if err != nil {
+		status = "failed"
+	}
+	s.m.DBQueryRecord(query, status, time.Since(start))
+}
+
 // GraphNode is one entity in a provenance graph response.
 type GraphNode struct {
 	ID           string            `json:"id"`
@@ -114,6 +126,7 @@ func (s *Store) QueryEntityGraph(ctx context.Context, entityID string, maxDepth 
 	// Anchor each CTE on WHERE id = $1 so dedup only touches the specific
 	// entity's rows (uses idx_entities_id) rather than scanning the whole table.
 	// Error flag is folded into the main query to eliminate a second round-trip.
+	start := time.Now()
 	rows, err := s.pool.Query(ctx, `
 		WITH RECURSIVE
 		ancestors(id, instrument_id, trace_id, timestamp_ns, parent_ids, metadata, depth) AS (
@@ -167,6 +180,7 @@ func (s *Store) QueryEntityGraph(ctx context.Context, entityID string, maxDepth 
 		LIMIT 500`,
 		entityID, maxDepth,
 	)
+	s.recordQuery("entity_graph", err, start)
 	if err != nil {
 		return nil, fmt.Errorf("graph query: %w", err)
 	}
