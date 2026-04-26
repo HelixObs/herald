@@ -130,6 +130,7 @@ func (icp *Interceptor) processSpan(span *tracepb.Span) {
 		events = append(events, db.EntityEvent{
 			InstrumentID: instrumentID,
 			EntityID:     entityID,
+			TraceID:      hex.EncodeToString(span.TraceId),
 			EventName:    ev.Name,
 			TimestampNs:  int64(ev.TimeUnixNano),
 			Metadata:     attrsToMap(ev.Attributes),

@@ -1,0 +1,1 @@
+ALTER TABLE entity_events ADD COLUMN IF NOT EXISTS trace_id TEXT;

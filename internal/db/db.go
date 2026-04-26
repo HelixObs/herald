@@ -40,6 +40,7 @@ type EntityOperation struct {
 type EntityEvent struct {
 	InstrumentID string
 	EntityID     string
+	TraceID      string
 	EventName    string
 	TimestampNs  int64
 	Metadata     map[string]string
@@ -355,26 +356,22 @@ type RawEntityRow struct {
 // QueryEntitiesRaw fetches entities for one instrument within [fromNs, toNs].
 // metaFilter is a validated SQL fragment (e.g. "metadata ? 'key1' AND metadata ? 'key2'")
 // injected into the WHERE clause after key validation in the monitor package.
-// TimescaleDB chunk pruning fires on created_at, so a 1-minute buffer is applied
-// around the nanosecond window to avoid missing rows whose created_at slightly leads
-// their timestamp_ns.
+// created_at ≈ timestamp_ns (both are wall-clock ingestion time), so filtering on
+// created_at alone is sufficient and lets TimescaleDB use chunk pruning directly.
 func (s *Store) QueryEntitiesRaw(ctx context.Context, instrument string, fromNs, toNs int64, metaFilter string) ([]RawEntityRow, error) {
-	const bufNs = 60_000_000_000 // 1 minute buffer for TimescaleDB chunk pruning
-	fromTime := time.Unix(0, fromNs-bufNs)
-	toTime := time.Unix(0, toNs+bufNs)
+	fromTime := time.Unix(0, fromNs)
+	toTime := time.Unix(0, toNs)
 
-	q := `SELECT DISTINCT ON (id) id, timestamp_ns, metadata
+	q := `SELECT id, timestamp_ns, metadata
 		FROM entities
 		WHERE instrument_id = $1
-		  AND created_at BETWEEN $2 AND $3
-		  AND timestamp_ns BETWEEN $4 AND $5`
+		  AND created_at BETWEEN $2 AND $3`
 	if metaFilter != "" {
 		q += " AND " + metaFilter
 	}
-	q += " ORDER BY id, created_at ASC"
 
 	start := time.Now()
-	rows, err := s.pool.Query(ctx, q, instrument, fromTime, toTime, fromNs, toNs)
+	rows, err := s.pool.Query(ctx, q, instrument, fromTime, toTime)
 	s.recordQuery("entities_raw", err, start)
 	if err != nil {
 		return nil, fmt.Errorf("query entities raw: %w", err)
@@ -410,9 +407,9 @@ func (s *Store) WriteEntityEvent(ctx context.Context, ev EntityEvent) error {
 	start := time.Now()
 	_, err = s.pool.Exec(ctx, `
 		INSERT INTO entity_events
-			(instrument_id, entity_id, event_name, timestamp_ns, metadata)
-		VALUES ($1, $2, $3, $4, $5)`,
-		ev.InstrumentID, ev.EntityID, ev.EventName, ev.TimestampNs, meta,
+			(instrument_id, entity_id, trace_id, event_name, timestamp_ns, metadata)
+		VALUES ($1, $2, $3, $4, $5, $6)`,
+		ev.InstrumentID, ev.EntityID, ev.TraceID, ev.EventName, ev.TimestampNs, meta,
 	)
 	s.recordWrite("entity_events", err, start)
 	return err
