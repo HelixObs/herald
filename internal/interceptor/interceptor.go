@@ -160,6 +160,7 @@ func (icp *Interceptor) processSpan(span *tracepb.Span) {
 			Operation:    span.Name,
 			TraceID:      hex.EncodeToString(span.TraceId),
 			TimestampNs:  int64(span.StartTimeUnixNano),
+			DurationNs:   int64(span.EndTimeUnixNano - span.StartTimeUnixNano),
 			Metadata:     attrsToMetadata(span.Attributes),
 		}
 		go func() {

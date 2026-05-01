@@ -33,7 +33,17 @@ type EntityOperation struct {
 	Operation    string
 	TraceID      string
 	TimestampNs  int64
+	DurationNs   int64
 	Metadata     map[string]string
+}
+
+// EntityOperationRow is one row returned by the entity operations read API.
+type EntityOperationRow struct {
+	Operation   string            `json:"operation"`
+	TraceID     string            `json:"trace_id"`
+	TimestampNs int64             `json:"timestamp_ns"`
+	DurationNs  int64             `json:"duration_ns"`
+	Metadata    map[string]string `json:"metadata"`
 }
 
 // EntityEvent is one row written to the entity_events hypertable.
@@ -318,9 +328,9 @@ func (s *Store) WriteEntityOperation(ctx context.Context, op EntityOperation) er
 	start := time.Now()
 	_, err = s.pool.Exec(ctx, `
 		INSERT INTO entity_operations
-			(entity_id, instrument_id, operation, trace_id, timestamp_ns, metadata)
-		VALUES ($1, $2, $3, $4, $5, $6)`,
-		op.EntityID, op.InstrumentID, op.Operation, op.TraceID, op.TimestampNs, meta,
+			(entity_id, instrument_id, operation, trace_id, timestamp_ns, duration_ns, metadata)
+		VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+		op.EntityID, op.InstrumentID, op.Operation, op.TraceID, op.TimestampNs, op.DurationNs, meta,
 	)
 	s.recordWrite("entity_operations", err, start)
 	if err != nil {
@@ -385,6 +395,46 @@ func (s *Store) QueryEntitiesRaw(ctx context.Context, instrument string, fromNs,
 			metaRaw []byte
 		)
 		if err := rows.Scan(&row.ID, &row.TimestampNs, &metaRaw); err != nil {
+			return nil, fmt.Errorf("scan: %w", err)
+		}
+		if err := json.Unmarshal(metaRaw, &row.Metadata); err != nil {
+			row.Metadata = map[string]string{}
+		}
+		result = append(result, row)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("rows: %w", err)
+	}
+	return result, nil
+}
+
+// QueryEntityOperations returns all operations for one entity, ordered by start time.
+func (s *Store) QueryEntityOperations(ctx context.Context, entityID string) ([]EntityOperationRow, error) {
+	start := time.Now()
+	rows, err := s.pool.Query(ctx, `
+		SELECT 'creation' AS operation, COALESCE(trace_id, ''), timestamp_ns, 0 AS duration_ns, metadata
+		FROM entities
+		WHERE id = $1 AND trace_id IS NOT NULL
+		UNION ALL
+		SELECT operation, COALESCE(trace_id, ''), timestamp_ns, COALESCE(duration_ns, 0), metadata
+		FROM entity_operations
+		WHERE entity_id = $1
+		ORDER BY timestamp_ns ASC`,
+		entityID,
+	)
+	s.recordQuery("entity_operations", err, start)
+	if err != nil {
+		return nil, fmt.Errorf("query entity operations: %w", err)
+	}
+	defer rows.Close()
+
+	var result []EntityOperationRow
+	for rows.Next() {
+		var (
+			row     EntityOperationRow
+			metaRaw []byte
+		)
+		if err := rows.Scan(&row.Operation, &row.TraceID, &row.TimestampNs, &row.DurationNs, &metaRaw); err != nil {
 			return nil, fmt.Errorf("scan: %w", err)
 		}
 		if err := json.Unmarshal(metaRaw, &row.Metadata); err != nil {

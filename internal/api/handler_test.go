@@ -23,6 +23,10 @@ func (m *mockQuerier) QueryEntityGraph(_ context.Context, _ string, _ int) (*db.
 	return m.graph, m.err
 }
 
+func (m *mockQuerier) QueryEntityOperations(_ context.Context, _ string) ([]db.EntityOperationRow, error) {
+	return nil, nil
+}
+
 func TestEntityGraphRouting(t *testing.T) {
 	// Unregistered routes return 404 from the mux — no DB needed.
 	h := api.New(nil, nil, nil)

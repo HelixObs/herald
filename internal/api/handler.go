@@ -18,6 +18,7 @@ import (
 // Querier is the database interface the Handler depends on.
 type Querier interface {
 	QueryEntityGraph(ctx context.Context, entityID string, maxDepth int) (*db.EntityGraph, error)
+	QueryEntityOperations(ctx context.Context, entityID string) ([]db.EntityOperationRow, error)
 }
 
 // MonitorStore is the database interface for the monitor binning API.
@@ -42,6 +43,7 @@ type Handler struct {
 func New(d Querier, ms MonitorStore, m apiMetrics) *Handler {
 	h := &Handler{db: d, monitor: ms, m: m, mux: http.NewServeMux()}
 	h.mux.HandleFunc("GET /api/v1/entity/{entity_id}/graph", h.entityGraph)
+	h.mux.HandleFunc("GET /api/v1/entity/{entity_id}/operations", h.entityOperations)
 	h.mux.HandleFunc("GET /api/v1/monitor/bins", h.monitorBins)
 	h.mux.HandleFunc("GET /api/v1/monitor/plots", h.monitorPlots)
 	return h
@@ -87,6 +89,49 @@ func (h *Handler) entityGraph(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	if err := json.NewEncoder(w).Encode(graph); err != nil {
 		slog.Error("entity graph encode failed", "entity_id", entityID, "error", err)
+	}
+}
+
+// entityOperations returns all operations for a single entity as a JSON array.
+//
+// GET /api/v1/entity/{entity_id}/operations
+func (h *Handler) entityOperations(w http.ResponseWriter, r *http.Request) {
+	start := time.Now()
+	status := "success"
+	defer func() {
+		if h.m != nil {
+			h.m.APIRequestRecord("entity_operations", status, time.Since(start))
+		}
+	}()
+
+	entityID := r.PathValue("entity_id")
+	if entityID == "" {
+		status = "bad_request"
+		http.Error(w, "missing entity_id", http.StatusBadRequest)
+		return
+	}
+
+	if h.db == nil {
+		status = "error"
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+
+	ops, err := h.db.QueryEntityOperations(r.Context(), entityID)
+	if err != nil {
+		status = "error"
+		slog.Error("entity operations query failed", "entity_id", entityID, "error", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	if ops == nil {
+		ops = []db.EntityOperationRow{}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	if err := json.NewEncoder(w).Encode(ops); err != nil {
+		slog.Error("entity operations encode failed", "entity_id", entityID, "error", err)
 	}
 }
 
