@@ -175,7 +175,7 @@ func (s *Store) QueryEntityGraph(ctx context.Context, entityID string, maxDepth 
 			UNION
 			SELECT e.id, e.instrument_id, e.trace_id, e.timestamp_ns, e.parent_ids, e.metadata, d.depth + 1
 			FROM entities e
-			INNER JOIN descendants d ON d.id = ANY(e.parent_ids)
+			INNER JOIN descendants d ON e.parent_ids @> ARRAY[d.id]
 			WHERE d.depth < 2
 		)
 		SELECT
