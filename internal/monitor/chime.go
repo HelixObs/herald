@@ -45,16 +45,18 @@ func (c *chimeDMPlot) Extract(e db.RawEntityRow) (y, snr float64, ok bool) {
 	return dm, snrVal, true
 }
 
-// chimeBeamPlot renders beam number vs time with SNR brightness.
+// chimeBeamPlot renders beam row (beam_no % 1000) vs time with SNR brightness.
+// CHIME beam numbers are in bands 0-255, 1000-1255, 2000-2255, 3000-3255;
+// modulo 1000 maps all bands onto the 0-255 row axis.
 type chimeBeamPlot struct{}
 
 func (c *chimeBeamPlot) Config() PlotConfig {
 	return PlotConfig{
 		Name:  "chime_beam_time",
-		Label: "Beam no",
+		Label: "Beam row (beam_no % 1000)",
 		YMin:  0,
-		YMax:  1023,
-		YUnit: "beam",
+		YMax:  255,
+		YUnit: "beam row",
 	}
 }
 
@@ -76,5 +78,5 @@ func (c *chimeBeamPlot) Extract(e db.RawEntityRow) (y, snr float64, ok bool) {
 	if err != nil {
 		return 0, 0, false
 	}
-	return float64(beamNo), snrVal, true
+	return float64(beamNo % 1000), snrVal, true
 }
