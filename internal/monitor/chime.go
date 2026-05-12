@@ -45,30 +45,30 @@ func (c *chimeDMPlot) Extract(e db.RawEntityRow) (y, snr float64, ok bool) {
 	return dm, snrVal, true
 }
 
-// chimeBeamPlot renders beam row (beam_id % 256) vs time with SNR brightness.
+// chimeBeamPlot renders beam number vs time with SNR brightness.
 type chimeBeamPlot struct{}
 
 func (c *chimeBeamPlot) Config() PlotConfig {
 	return PlotConfig{
 		Name:  "chime_beam_time",
-		Label: "Beam row (beam_id % 256)",
+		Label: "Beam no",
 		YMin:  0,
-		YMax:  255,
-		YUnit: "beam row",
+		YMax:  1023,
+		YUnit: "beam",
 	}
 }
 
 func (c *chimeBeamPlot) RequiredKeys() []string {
-	return []string{"helix.chime.beam_id", "helix.chime.snr"}
+	return []string{"helix.chime.beam_no", "helix.chime.snr"}
 }
 
 func (c *chimeBeamPlot) Extract(e db.RawEntityRow) (y, snr float64, ok bool) {
-	beamStr, hasBeam := e.Metadata["helix.chime.beam_id"]
+	beamStr, hasBeam := e.Metadata["helix.chime.beam_no"]
 	snrStr, hasSNR := e.Metadata["helix.chime.snr"]
 	if !hasBeam || !hasSNR {
 		return 0, 0, false
 	}
-	beamID, err := strconv.ParseInt(beamStr, 10, 64)
+	beamNo, err := strconv.ParseInt(beamStr, 10, 64)
 	if err != nil {
 		return 0, 0, false
 	}
@@ -76,5 +76,5 @@ func (c *chimeBeamPlot) Extract(e db.RawEntityRow) (y, snr float64, ok bool) {
 	if err != nil {
 		return 0, 0, false
 	}
-	return float64(beamID % 1000), snrVal, true
+	return float64(beamNo), snrVal, true
 }
