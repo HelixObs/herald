@@ -70,7 +70,12 @@ type Store struct {
 }
 
 func New(ctx context.Context, connStr string, m dbMetrics) (*Store, error) {
-	pool, err := pgxpool.New(ctx, connStr)
+	cfg, err := pgxpool.ParseConfig(connStr)
+	if err != nil {
+		return nil, fmt.Errorf("parse db config: %w", err)
+	}
+	cfg.MaxConns = 40
+	pool, err := pgxpool.NewWithConfig(ctx, cfg)
 	if err != nil {
 		return nil, fmt.Errorf("open pool: %w", err)
 	}
