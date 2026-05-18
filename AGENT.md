@@ -39,11 +39,33 @@ internal/
   api/
     handler.go          HTTP query API — GET /api/v1/entity/{entity_id}/graph
     handler_test.go
+  notifier/
+    backends.go         MessagingBackend and SCMBackend interfaces + SCMParams
+    notifier.go         dispatch loop — silence check, semaphore gating, message building
+    notifier_test.go
+    config/
+      config.go         hot-reload YAML loader; produces MessagingCall/SCMCall per event
+      config_test.go
+    fingerprint/
+      fingerprint.go    message normalisation + SHA-256 dedup key
+      fingerprint_test.go
+    silence/
+      silence.go        TTL-cached silence rule checker
+      silence_test.go
+    slack/
+      slack.go          MessagingBackend: per-fingerprint rate limiting + digest
+      slack_test.go
+    github/
+      github.go         SCMBackend: create/update/reopen GitHub Issues, body-edit only
+      github_test.go
 migrations/
   001_init.sql          Core schema: entities, entity_events, entity_operations hypertables
   002_instrument_memory.sql  instrument_memory table for Sherlock Tier 2 context
   003_trace_dedup.sql   operation_trace_seen dedup table
   004_sherlock_usage.sql    sherlock_usage cost ledger hypertable
+  008_notifications.sql     notification_issues and notification_silences tables
+instruments/
+  chime-context.yml     Reference CHIME notification config (canonical, shared with Sherlock)
 ```
 
 ## Span attribute contract (shared with client library)
@@ -86,6 +108,72 @@ The response includes ancestor nodes (recursive CTE), one level of descendants, 
 
 Served on `API_ADDR` (default `:8080`), separate from the Prometheus metrics port (`:2112`).
 
+## Notification system
+
+The notifier dispatches Slack messages and GitHub issues for `helix.*` span events, driven
+by per-instrument YAML config files loaded from `INSTRUMENTS_DIR`.
+
+### Pluggable backends
+
+Two interfaces in `internal/notifier/backends.go`:
+
+- **`MessagingBackend`** — `Send(...)` + `FlushDigests(...)`. Implemented by `notifier/slack`.
+- **`SCMBackend`** — `Dispatch(ctx, SCMParams)`. Implemented by `notifier/github`.
+
+Register backends in `main.go` via `n.RegisterMessaging(name, backend)` / `n.RegisterSCM(name, backend)`.
+New backends (Discord, GitLab, etc.) only need to implement the interface — no changes to core notifier logic.
+
+### Config format (`instruments/*.yml`)
+
+```yaml
+instrument_id: CHIME
+notifications:
+  slack_webhook_env: CHIMEFRB_SLACK_WEBHOOK   # env var → webhook URL (instrument default)
+  github_token_env:  CHIMEFRB_GITHUB_TOKEN    # env var → PAT
+
+  events:
+    helix.error:
+      message_template: "{{.field}}"          # optional Go template over event Metadata
+      slack:
+        channel: "#chime-frb-alerts"
+        webhook_env: OVERRIDE_WEBHOOK         # optional per-event override
+        sample_window_seconds: 600
+        max_per_window: 1
+      github:
+        repo: org/repo
+        labels: [helixobs, bug]
+        auto_close_after_days: 7
+        on_recurrence_after_close: reopen     # or "new_issue"
+```
+
+Config files are hot-reloaded every `NOTIFIER_RELOAD_INTERVAL_SECS` seconds without a restart.
+Credentials are resolved from environment variables at load time — never stored in YAML.
+
+### GitHub issue lifecycle
+
+- **New fingerprint**: creates issue with running stats in body.
+- **Recurrence (open issue)**: updates body only — no new comments, no comment count growth.
+- **Recurrence (closed issue, `reopen`)**: reopens with a single state-change comment, then updates body.
+- **Recurrence (closed issue, `new_issue`)**: deletes DB record, creates a new issue.
+- Body always shows: error summary, first/last seen, total occurrences, up to 10 recent entity IDs.
+
+### Event flow defences
+
+| Layer | Mechanism | Cap |
+|---|---|---|
+| Event channel | `chan Event` drop if full | `NOTIFIER_CHANNEL_BUFFER` (default 1000) |
+| Per-backend goroutines | semaphore per backend type | 20 concurrent |
+| Slack rate limiting | per-fingerprint sliding window | configurable per event |
+| Silence rules | DB-cached per instrument, TTL 60s | — |
+
+### Silence API
+
+`POST /api/v1/silences` — create a silence rule (instrument-wide, event-type, or fingerprint).
+`GET  /api/v1/silences?instrument_id=X` — list silences.
+`DELETE /api/v1/silences/{id}` — remove a silence.
+
+Silence rules are persisted in `notification_silences` and cached in-process with a 60s TTL.
+
 ## Prometheus metrics
 
 ### Pipeline throughput
@@ -126,6 +214,15 @@ Served on `API_ADDR` (default `:8080`), separate from the Prometheus metrics por
 | `helix_db_connections_in_use` | — | Pool connections acquired |
 | `helix_db_connections_total` | — | Total pool size |
 
+### Notifications
+| Metric | Labels | Description |
+|---|---|---|
+| `helix_notifications_sent_total` | `instrument_id`, `type`, `event_name` | Dispatched notifications |
+| `helix_notifications_suppressed_total` | `instrument_id`, `reason`, `event_name` | Rate-limited or silenced |
+| `helix_notification_errors_total` | `instrument_id`, `type` | Send failures after retries |
+| `helix_notification_send_duration_seconds` | `type` | Send latency per backend type |
+| `helix_notification_channel_drops_total` | — | Events dropped (channel full or semaphore full) |
+
 ## Environment variables
 
 | Variable | Default | Description |
@@ -135,6 +232,9 @@ Served on `API_ADDR` (default `:8080`), separate from the Prometheus metrics por
 | `DB_URL` | `postgres://helix:helix@db:5432/helixobs` | TimescaleDB connection string |
 | `METRICS_ADDR` | `:2112` | Prometheus `/metrics` HTTP endpoint |
 | `API_ADDR` | `:8080` | HTTP query API endpoint |
+| `INSTRUMENTS_DIR` | `/instruments` | Directory of instrument YAML config files |
+| `UI_BASE_URL` | `http://localhost:8081` | Base URL for entity inspector links in notifications |
+| `GRAFANA_URL` | `http://localhost:3001` | Grafana URL for error-entities dashboard links |
 
 ## Running tests
 
@@ -151,5 +251,8 @@ registry per test — no external dependencies required.
 - New Prometheus metrics → `internal/metrics/metrics.go` + register in `New()`
 - New DB tables/queries → `internal/db/db.go` + new migration file in `migrations/`
 - New API endpoints → `internal/api/handler.go`
+- New messaging backend (e.g. Discord) → implement `notifier.MessagingBackend`, register in `main.go` via `n.RegisterMessaging("discord", ...)`
+- New SCM backend (e.g. GitLab) → implement `notifier.SCMBackend`, register via `n.RegisterSCM("gitlab", ...)`
+- New YAML config fields → extend raw structs in `notifier/config/config.go` and update `resolveSlack`/`resolveGithub` (or add `resolveDiscord`, etc.)
 - The `receiver.go` should stay thin — it only calls the interceptor and forwards
 - When adding a new system attribute (like `helix.entity.is_operation`), add it to the exclusion list in `attrsToMetadata()` so it doesn't appear in the `metadata` JSONB column

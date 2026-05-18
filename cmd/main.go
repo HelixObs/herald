@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -21,6 +22,11 @@ import (
 	"github.com/HelixObs/gateway/internal/db"
 	"github.com/HelixObs/gateway/internal/interceptor"
 	"github.com/HelixObs/gateway/internal/metrics"
+	"github.com/HelixObs/gateway/internal/notifier"
+	notifiercfg "github.com/HelixObs/gateway/internal/notifier/config"
+	ghbackend "github.com/HelixObs/gateway/internal/notifier/github"
+	slackbackend "github.com/HelixObs/gateway/internal/notifier/slack"
+	"github.com/HelixObs/gateway/internal/notifier/silence"
 	"github.com/HelixObs/gateway/internal/receiver"
 	"github.com/HelixObs/gateway/internal/store"
 )
@@ -49,9 +55,32 @@ func run() error {
 	}
 	defer dbStore.Close()
 
+	// ── Notifier ─────────────────────────────────────────────────────────
+	cfgLoader := notifiercfg.New(
+		cfg.instrumentsDir,
+		time.Duration(cfg.notifierMinSlackWindowSecs)*time.Second,
+		time.Duration(cfg.notifierMinGithubWindowSecs)*time.Second,
+	)
+	cfgLoader.Start(ctx, time.Duration(cfg.notifierReloadIntervalSecs)*time.Second)
+
+	silenceStore := silence.New(dbStore, 60*time.Second)
+
+	n := notifier.New(
+		cfgLoader,
+		silenceStore,
+		m,
+		cfg.notifierChannelBuffer,
+		cfg.uiBaseURL,
+		cfg.grafanaURL,
+	)
+	n.RegisterMessaging("slack", slackbackend.New())
+	n.RegisterSCM("github", ghbackend.New(dbStore))
+	go n.Start(ctx)
+
 	// ── Interceptor ───────────────────────────────────────────────────
 	traceStore := store.New(cfg.traceStoreSize, m)
 	icp := interceptor.New(traceStore, dbStore, m)
+	icp.WithNotifier(n)
 
 	// ── OTLP receiver + downstream forwarder ──────────────────────────
 	recv, err := receiver.Dial(icp, cfg.collectorEndpoint)
@@ -115,6 +144,15 @@ type config struct {
 	metricsAddr       string
 	apiAddr           string
 	traceStoreSize    int
+
+	// Notifier
+	instrumentsDir              string
+	notifierReloadIntervalSecs  int
+	notifierMinSlackWindowSecs  int
+	notifierMinGithubWindowSecs int
+	notifierChannelBuffer       int
+	uiBaseURL                   string
+	grafanaURL                  string
 }
 
 func configFromEnv() config {
@@ -125,6 +163,14 @@ func configFromEnv() config {
 		metricsAddr:       envOr("METRICS_ADDR", ":2112"),
 		apiAddr:           envOr("API_ADDR", ":8080"),
 		traceStoreSize:    10_000,
+
+		instrumentsDir:              envOr("INSTRUMENTS_DIR", "/instruments"),
+		notifierReloadIntervalSecs:  30,
+		notifierMinSlackWindowSecs:  5,
+		notifierMinGithubWindowSecs: 60,
+		notifierChannelBuffer:       1000,
+		uiBaseURL:                   envOr("UI_BASE_URL", "http://localhost:8081"),
+		grafanaURL:                  envOr("GRAFANA_URL", "http://localhost:3001"),
 	}
 }
 

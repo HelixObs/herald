@@ -30,6 +30,7 @@ import (
 
 	"github.com/HelixObs/gateway/internal/db"
 	"github.com/HelixObs/gateway/internal/metrics"
+	"github.com/HelixObs/gateway/internal/notifier"
 	"github.com/HelixObs/gateway/internal/store"
 )
 
@@ -43,13 +44,19 @@ const (
 // Interceptor processes an ExportTraceServiceRequest in-place before it is
 // forwarded to the downstream OTel Collector.
 type Interceptor struct {
-	store   *store.TraceStore
-	db      *db.Store
-	metrics *metrics.Metrics
+	store    *store.TraceStore
+	db       *db.Store
+	metrics  *metrics.Metrics
+	notifier *notifier.Notifier // nil disables notifications
 }
 
 func New(s *store.TraceStore, d *db.Store, m *metrics.Metrics) *Interceptor {
 	return &Interceptor{store: s, db: d, metrics: m}
+}
+
+// WithNotifier attaches a Notifier so helix.* events are dispatched after DB writes.
+func (icp *Interceptor) WithNotifier(n *notifier.Notifier) {
+	icp.notifier = n
 }
 
 // Process mutates each helix-annotated span in req — adding span links and
@@ -195,7 +202,28 @@ func (icp *Interceptor) processSpan(span *tracepb.Span) {
 				icp.metrics.DBWriteErrorsTotal.Inc()
 			}
 		}()
+		if icp.notifier != nil {
+			icp.notifier.Send(notifier.Event{
+				InstrumentID: ev.InstrumentID,
+				EntityID:     ev.EntityID,
+				EventName:    ev.EventName,
+				Stage:        ev.Metadata["stage"],
+				Message:      coalesceMetadata(ev.Metadata, "message", "exception.message"),
+				TimestampNs:  ev.TimestampNs,
+				Metadata:     ev.Metadata,
+			})
+		}
 	}
+}
+
+// coalesceMetadata returns the first non-empty value from metadata for the given keys.
+func coalesceMetadata(m map[string]string, keys ...string) string {
+	for _, k := range keys {
+		if v := m[k]; v != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 // ── Attribute helpers ─────────────────────────────────────────────────────────

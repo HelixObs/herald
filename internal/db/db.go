@@ -453,6 +453,150 @@ func (s *Store) QueryEntityOperations(ctx context.Context, entityID string) ([]E
 	return result, nil
 }
 
+// ── Notification DB ───────────────────────────────────────────────────────────
+
+// NotificationIssue is one row from notification_issues.
+type NotificationIssue struct {
+	InstrumentID      string
+	ErrorFingerprint  string
+	GithubRepo        string
+	GithubIssueNumber int
+	EntityCount       int
+	FirstSeenAt       time.Time
+	LastUpdatedAt     time.Time
+	RecentEntityIDs   []string
+}
+
+// Silence is one row from notification_silences.
+type Silence struct {
+	ID           int       `json:"id"`
+	InstrumentID string    `json:"instrument_id"`
+	EventType    string    `json:"event_type,omitempty"`
+	Fingerprint  string    `json:"fingerprint,omitempty"`
+	SilencedBy   string    `json:"silenced_by"`
+	SilencedAt   time.Time `json:"silenced_at"`
+	ExpiresAt    time.Time `json:"expires_at"`
+	Reason       string    `json:"reason,omitempty"`
+}
+
+// FindNotificationIssue returns the persisted record for a fingerprint, or nil if none exists.
+func (s *Store) FindNotificationIssue(ctx context.Context, instrumentID, fingerprint, repo string) (*NotificationIssue, error) {
+	var rec NotificationIssue
+	err := s.pool.QueryRow(ctx, `
+		SELECT github_issue_number, entity_count, first_seen_at, COALESCE(recent_entity_ids, '{}')
+		FROM notification_issues
+		WHERE instrument_id = $1 AND error_fingerprint = $2 AND github_repo = $3`,
+		instrumentID, fingerprint, repo,
+	).Scan(&rec.GithubIssueNumber, &rec.EntityCount, &rec.FirstSeenAt, &rec.RecentEntityIDs)
+	if err != nil && err.Error() == "no rows in result set" {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &rec, nil
+}
+
+// UpsertNotificationIssue creates or updates a notification_issues row.
+// first_seen_at is set only on INSERT — never overwritten.
+// entityID is prepended to recent_entity_ids; the list is capped at 10.
+func (s *Store) UpsertNotificationIssue(ctx context.Context, instrumentID, fingerprint, repo string, issueNum int, entityID string) error {
+	_, err := s.pool.Exec(ctx, `
+		INSERT INTO notification_issues
+			(instrument_id, error_fingerprint, github_repo, github_issue_number, entity_count, first_seen_at, last_updated_at, recent_entity_ids)
+		VALUES ($1, $2, $3, $4, 1, now(), now(), ARRAY[$5])
+		ON CONFLICT (instrument_id, error_fingerprint, github_repo) DO UPDATE
+			SET github_issue_number = EXCLUDED.github_issue_number,
+			    entity_count        = notification_issues.entity_count + 1,
+			    last_updated_at     = now(),
+			    recent_entity_ids   = (ARRAY[$5] || notification_issues.recent_entity_ids)[1:10]`,
+		instrumentID, fingerprint, repo, issueNum, entityID,
+	)
+	return err
+}
+
+// DeleteNotificationIssue removes a dedup record (used when an issue is deleted on GitHub).
+func (s *Store) DeleteNotificationIssue(ctx context.Context, instrumentID, fingerprint, repo string) error {
+	_, err := s.pool.Exec(ctx, `
+		DELETE FROM notification_issues
+		WHERE instrument_id = $1 AND error_fingerprint = $2 AND github_repo = $3`,
+		instrumentID, fingerprint, repo,
+	)
+	return err
+}
+
+// ActiveSilences returns all non-expired silence rules for an instrument.
+func (s *Store) ActiveSilences(ctx context.Context, instrumentID string) ([]Silence, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT id, instrument_id, COALESCE(event_type,''), COALESCE(fingerprint,''),
+		       silenced_by, silenced_at, expires_at, COALESCE(reason,'')
+		FROM notification_silences
+		WHERE instrument_id = $1 AND expires_at > now()
+		ORDER BY silenced_at DESC`,
+		instrumentID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var silences []Silence
+	for rows.Next() {
+		var s Silence
+		if err := rows.Scan(&s.ID, &s.InstrumentID, &s.EventType, &s.Fingerprint,
+			&s.SilencedBy, &s.SilencedAt, &s.ExpiresAt, &s.Reason); err != nil {
+			return nil, err
+		}
+		silences = append(silences, s)
+	}
+	return silences, rows.Err()
+}
+
+// CreateSilence inserts a new silence rule and returns its ID.
+func (s *Store) CreateSilence(ctx context.Context, silence Silence) (int, error) {
+	var id int
+	err := s.pool.QueryRow(ctx, `
+		INSERT INTO notification_silences
+			(instrument_id, event_type, fingerprint, silenced_by, expires_at, reason)
+		VALUES ($1, NULLIF($2,''), NULLIF($3,''), $4, $5, NULLIF($6,''))
+		RETURNING id`,
+		silence.InstrumentID, silence.EventType, silence.Fingerprint,
+		silence.SilencedBy, silence.ExpiresAt, silence.Reason,
+	).Scan(&id)
+	return id, err
+}
+
+// DeleteSilence removes a silence rule by ID.
+func (s *Store) DeleteSilence(ctx context.Context, id int) error {
+	_, err := s.pool.Exec(ctx, `DELETE FROM notification_silences WHERE id = $1`, id)
+	return err
+}
+
+// ListSilences returns all silences for an instrument (including expired ones).
+func (s *Store) ListSilences(ctx context.Context, instrumentID string) ([]Silence, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT id, instrument_id, COALESCE(event_type,''), COALESCE(fingerprint,''),
+		       silenced_by, silenced_at, expires_at, COALESCE(reason,'')
+		FROM notification_silences
+		WHERE instrument_id = $1
+		ORDER BY expires_at DESC`,
+		instrumentID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var silences []Silence
+	for rows.Next() {
+		var s Silence
+		if err := rows.Scan(&s.ID, &s.InstrumentID, &s.EventType, &s.Fingerprint,
+			&s.SilencedBy, &s.SilencedAt, &s.ExpiresAt, &s.Reason); err != nil {
+			return nil, err
+		}
+		silences = append(silences, s)
+	}
+	return silences, rows.Err()
+}
+
 // WriteEntityEvent inserts one entity_event row.
 func (s *Store) WriteEntityEvent(ctx context.Context, ev EntityEvent) error {
 	meta, err := json.Marshal(ev.Metadata)

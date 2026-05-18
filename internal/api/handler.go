@@ -26,6 +26,13 @@ type MonitorStore interface {
 	QueryEntitiesRaw(ctx context.Context, instrument string, fromNs, toNs int64, metaFilter string) ([]db.RawEntityRow, error)
 }
 
+// SilenceStore is the database interface for silence CRUD.
+type SilenceStore interface {
+	CreateSilence(ctx context.Context, s db.Silence) (int, error)
+	DeleteSilence(ctx context.Context, id int) error
+	ListSilences(ctx context.Context, instrumentID string) ([]db.Silence, error)
+}
+
 // apiMetrics is the subset of gateway metrics used by the API handler.
 type apiMetrics interface {
 	APIRequestRecord(handler, status string, dur time.Duration)
@@ -35,18 +42,117 @@ type apiMetrics interface {
 type Handler struct {
 	db      Querier
 	monitor MonitorStore
+	silence SilenceStore
 	m       apiMetrics
 	mux     *http.ServeMux
 }
 
 // New registers all API routes and returns a ready Handler.
 func New(d Querier, ms MonitorStore, m apiMetrics) *Handler {
-	h := &Handler{db: d, monitor: ms, m: m, mux: http.NewServeMux()}
+	ss, _ := d.(SilenceStore) // db.Store implements SilenceStore; cast is safe
+	h := &Handler{db: d, monitor: ms, silence: ss, m: m, mux: http.NewServeMux()}
 	h.mux.HandleFunc("GET /api/v1/entity/{entity_id}/graph", h.entityGraph)
 	h.mux.HandleFunc("GET /api/v1/entity/{entity_id}/operations", h.entityOperations)
 	h.mux.HandleFunc("GET /api/v1/monitor/bins", h.monitorBins)
 	h.mux.HandleFunc("GET /api/v1/monitor/plots", h.monitorPlots)
+	h.mux.HandleFunc("POST /api/v1/notifications/silence", h.createSilence)
+	h.mux.HandleFunc("DELETE /api/v1/notifications/silence/{id}", h.deleteSilence)
+	h.mux.HandleFunc("GET /api/v1/notifications/silences", h.listSilences)
 	return h
+}
+
+// createSilence creates a new silence rule.
+//
+// POST /api/v1/notifications/silence
+// Body: { instrument_id, event_type?, fingerprint?, duration_minutes, silenced_by, reason? }
+func (h *Handler) createSilence(w http.ResponseWriter, r *http.Request) {
+	start := time.Now()
+	var req struct {
+		InstrumentID    string `json:"instrument_id"`
+		EventType       string `json:"event_type"`
+		Fingerprint     string `json:"fingerprint"`
+		DurationMinutes int    `json:"duration_minutes"`
+		SilencedBy      string `json:"silenced_by"`
+		Reason          string `json:"reason"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid request body", http.StatusBadRequest)
+		h.m.APIRequestRecord("create_silence", "400", time.Since(start))
+		return
+	}
+	if req.InstrumentID == "" || req.DurationMinutes <= 0 || req.SilencedBy == "" {
+		http.Error(w, "instrument_id, duration_minutes, and silenced_by are required", http.StatusBadRequest)
+		h.m.APIRequestRecord("create_silence", "400", time.Since(start))
+		return
+	}
+
+	silence := db.Silence{
+		InstrumentID: req.InstrumentID,
+		EventType:    req.EventType,
+		Fingerprint:  req.Fingerprint,
+		SilencedBy:   req.SilencedBy,
+		ExpiresAt:    time.Now().Add(time.Duration(req.DurationMinutes) * time.Minute),
+		Reason:       req.Reason,
+	}
+	id, err := h.silence.CreateSilence(r.Context(), silence)
+	if err != nil {
+		slog.Error("create silence failed", "error", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		h.m.APIRequestRecord("create_silence", "500", time.Since(start))
+		return
+	}
+	silence.ID = id
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	json.NewEncoder(w).Encode(silence) //nolint:errcheck
+	h.m.APIRequestRecord("create_silence", "201", time.Since(start))
+}
+
+// deleteSilence removes a silence rule by ID.
+//
+// DELETE /api/v1/notifications/silence/{id}
+func (h *Handler) deleteSilence(w http.ResponseWriter, r *http.Request) {
+	start := time.Now()
+	id, err := strconv.Atoi(r.PathValue("id"))
+	if err != nil {
+		http.Error(w, "invalid id", http.StatusBadRequest)
+		h.m.APIRequestRecord("delete_silence", "400", time.Since(start))
+		return
+	}
+	if err := h.silence.DeleteSilence(r.Context(), id); err != nil {
+		slog.Error("delete silence failed", "id", id, "error", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		h.m.APIRequestRecord("delete_silence", "500", time.Since(start))
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+	h.m.APIRequestRecord("delete_silence", "204", time.Since(start))
+}
+
+// listSilences returns all silences for an instrument.
+//
+// GET /api/v1/notifications/silences?instrument_id=CHIMEFRB
+func (h *Handler) listSilences(w http.ResponseWriter, r *http.Request) {
+	start := time.Now()
+	instrumentID := r.URL.Query().Get("instrument_id")
+	if instrumentID == "" {
+		http.Error(w, "instrument_id query param required", http.StatusBadRequest)
+		h.m.APIRequestRecord("list_silences", "400", time.Since(start))
+		return
+	}
+	silences, err := h.silence.ListSilences(r.Context(), instrumentID)
+	if err != nil {
+		slog.Error("list silences failed", "error", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		h.m.APIRequestRecord("list_silences", "500", time.Since(start))
+		return
+	}
+	if silences == nil {
+		silences = []db.Silence{}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(silences) //nolint:errcheck
+	h.m.APIRequestRecord("list_silences", "200", time.Since(start))
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {

@@ -95,6 +95,35 @@ type Metrics struct {
 
 	// APIRequestDuration measures end-to-end HTTP handler latency.
 	APIRequestDuration *prometheus.HistogramVec
+
+	// ── Notifications ─────────────────────────────────────────────────────
+
+	// NotificationsSentTotal counts successfully dispatched notifications.
+	NotificationsSentTotal *prometheus.CounterVec
+
+	// NotificationsSuppressedTotal counts notifications suppressed by rate limiter or silence rules.
+	NotificationsSuppressedTotal *prometheus.CounterVec
+
+	// NotificationsDigestSentTotal counts end-of-window digest messages sent.
+	NotificationsDigestSentTotal *prometheus.CounterVec
+
+	// NotificationErrorsTotal counts send failures after all retries.
+	NotificationErrorsTotal *prometheus.CounterVec
+
+	// NotificationRetriesTotal counts retry attempts.
+	NotificationRetriesTotal *prometheus.CounterVec
+
+	// NotificationSendDuration measures send latency per channel type.
+	NotificationSendDuration *prometheus.HistogramVec
+
+	// NotificationChannelDropsTotal counts events dropped due to a full internal channel.
+	NotificationChannelDropsTotal prometheus.Counter
+
+	// NotificationSilencesActive tracks currently active silence rules per instrument.
+	NotificationSilencesActive *prometheus.GaugeVec
+
+	// NotificationConfigReloadErrorsTotal counts config reload validation failures.
+	NotificationConfigReloadErrorsTotal *prometheus.CounterVec
 }
 
 // New registers all metrics with reg and returns a Metrics instance.
@@ -222,10 +251,65 @@ func New(reg prometheus.Registerer) *Metrics {
 			Help:    "HTTP API end-to-end handler latency.",
 			Buckets: []float64{.005, .01, .025, .05, .1, .25, .5, 1, 2.5, 5},
 		}, []string{"handler"}),
+
+		NotificationsSentTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "helix_notifications_sent_total",
+			Help: "Notifications successfully dispatched.",
+		}, []string{"instrument_id", "channel_type", "event_type"}),
+
+		NotificationsSuppressedTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "helix_notifications_suppressed_total",
+			Help: "Notifications suppressed by rate limiter or silence rules.",
+		}, []string{"instrument_id", "channel_type", "event_type"}),
+
+		NotificationsDigestSentTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "helix_notifications_digest_sent_total",
+			Help: "End-of-window digest messages sent.",
+		}, []string{"instrument_id", "channel_type"}),
+
+		NotificationErrorsTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "helix_notification_errors_total",
+			Help: "Notification send failures after all retries.",
+		}, []string{"instrument_id", "channel_type"}),
+
+		NotificationRetriesTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "helix_notification_retries_total",
+			Help: "Notification send retry attempts.",
+		}, []string{"instrument_id", "channel_type"}),
+
+		NotificationSendDuration: prometheus.NewHistogramVec(prometheus.HistogramOpts{
+			Name:    "helix_notification_send_duration_seconds",
+			Help:    "Notification send latency per channel type.",
+			Buckets: []float64{.05, .1, .25, .5, 1, 2.5, 5, 10},
+		}, []string{"channel_type"}),
+
+		NotificationChannelDropsTotal: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "helix_notification_channel_drops_total",
+			Help: "Events dropped because the internal notifier channel was full.",
+		}),
+
+		NotificationSilencesActive: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "helix_notification_silences_active",
+			Help: "Currently active silence rules per instrument.",
+		}, []string{"instrument_id"}),
+
+		NotificationConfigReloadErrorsTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "helix_notification_config_reload_errors_total",
+			Help: "Instrument notification config reload validation failures.",
+		}, []string{"instrument_id"}),
 	}
 
 	reg.MustRegister(
 		m.EntitiesTotal,
+		m.NotificationsSentTotal,
+		m.NotificationsSuppressedTotal,
+		m.NotificationsDigestSentTotal,
+		m.NotificationErrorsTotal,
+		m.NotificationRetriesTotal,
+		m.NotificationSendDuration,
+		m.NotificationChannelDropsTotal,
+		m.NotificationSilencesActive,
+		m.NotificationConfigReloadErrorsTotal,
 		m.SpansReceivedTotal,
 		m.SpansPassthroughTotal,
 		m.SpanProcessingDuration,
