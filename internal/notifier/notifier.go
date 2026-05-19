@@ -2,8 +2,9 @@
 //
 // Backends are registered at startup via RegisterMessaging / RegisterSCM.
 // The interceptor sends events to the Notifier's channel after writing them to DB.
-// A single goroutine drains the channel, applies silence rules, rate limits, and
-// dispatches to each configured backend concurrently per event.
+// For each event: SCM backends (GitHub, etc.) run first with a WaitGroup so issue URLs
+// are collected, then messaging backends (Slack, etc.) fire with those URLs included.
+// All dispatch happens in a goroutine so the event loop never blocks on slow API calls.
 package notifier
 
 import (
@@ -11,7 +12,9 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"sort"
 	"strings"
+	"sync"
 	"text/template"
 	"time"
 
@@ -103,7 +106,7 @@ func (n *Notifier) Start(ctx context.Context) {
 	for {
 		select {
 		case e := <-n.ch:
-			n.dispatch(ctx, e)
+			go n.dispatch(ctx, e) // goroutine so the loop never blocks on slow API calls
 		case <-digestTicker.C:
 			n.flushDigests(ctx)
 		case <-ctx.Done():
@@ -134,6 +137,43 @@ func (n *Notifier) dispatch(ctx context.Context, e Event) {
 	inspectorURL := fmt.Sprintf("%s/entity/%s", n.uiBase, e.EntityID)
 	errEntitiesURL := fmt.Sprintf("%s/d/helix-error-entities", n.grafana)
 
+	// SCM backends (GitHub, etc.) run first. We wait for all of them so that
+	// messaging backends (Slack, etc.) can include the issue URLs in their messages.
+	var (
+		urlMu     sync.Mutex
+		issueURLs []string
+		wg        sync.WaitGroup
+	)
+
+	for _, sc := range evCfg.SCM {
+		sc := sc
+		backend, ok := n.scm[sc.Type]
+		if !ok {
+			slog.Warn("notifier: no SCM backend registered", "type", sc.Type)
+			continue
+		}
+		sem := n.sem[sc.Type+"_scm"]
+		select {
+		case sem <- struct{}{}:
+			wg.Add(1)
+			go func() {
+				defer func() { <-sem }()
+				defer wg.Done()
+				if u := n.doSCM(ctx, e, sc, backend, fp, inspectorURL); u != "" {
+					urlMu.Lock()
+					issueURLs = append(issueURLs, u)
+					urlMu.Unlock()
+				}
+			}()
+		default:
+			n.metrics.NotificationChannelDropsTotal.Inc()
+			slog.Warn("notifier: SCM semaphore full, dropping",
+				"type", sc.Type, "instrument", e.InstrumentID, "event", e.EventName)
+		}
+	}
+
+	wg.Wait() // block until all SCM goroutines have finished and URLs are collected
+
 	for _, mc := range evCfg.Messaging {
 		mc := mc
 		backend, ok := n.messaging[mc.Type]
@@ -146,7 +186,7 @@ func (n *Notifier) dispatch(ctx context.Context, e Event) {
 		case sem <- struct{}{}:
 			go func() {
 				defer func() { <-sem }()
-				n.doMessaging(ctx, e, mc, backend, fp, inspectorURL, errEntitiesURL)
+				n.doMessaging(ctx, e, mc, backend, fp, inspectorURL, errEntitiesURL, issueURLs)
 			}()
 		default:
 			n.metrics.NotificationChannelDropsTotal.Inc()
@@ -154,39 +194,16 @@ func (n *Notifier) dispatch(ctx context.Context, e Event) {
 				"type", mc.Type, "instrument", e.InstrumentID, "event", e.EventName)
 		}
 	}
-
-	for _, sc := range evCfg.SCM {
-		sc := sc
-		backend, ok := n.scm[sc.Type]
-		if !ok {
-			slog.Warn("notifier: no SCM backend registered", "type", sc.Type)
-			continue
-		}
-		sem := n.sem[sc.Type+"_scm"]
-		select {
-		case sem <- struct{}{}:
-			go func() {
-				defer func() { <-sem }()
-				n.doSCM(ctx, e, sc, backend, fp, inspectorURL)
-			}()
-		default:
-			n.metrics.NotificationChannelDropsTotal.Inc()
-			slog.Warn("notifier: SCM semaphore full, dropping",
-				"type", sc.Type, "instrument", e.InstrumentID, "event", e.EventName)
-		}
-	}
 }
 
 func (n *Notifier) doMessaging(ctx context.Context, e Event, mc config.MessagingCall,
-	backend MessagingBackend, fp, inspectorURL, errEntitiesURL string) {
+	backend MessagingBackend, fp, inspectorURL, errEntitiesURL string, issueURLs []string) {
 
-	tmpl := mc.MessageTemplate
-	if tmpl == "" {
-		tmpl = "" // falls through to default builder
-	}
-	msg := n.buildMessage(e, tmpl, inspectorURL, errEntitiesURL)
+	msg := n.buildMsg(e, mc.MessageTemplate, inspectorURL, errEntitiesURL, issueURLs)
 
+	start := time.Now()
 	sent, err := backend.Send(ctx, mc.Destination, fp, msg, mc.SampleWindowSeconds, mc.MaxPerWindow)
+	dur := time.Since(start)
 	if err != nil {
 		n.metrics.NotificationErrorsTotal.WithLabelValues(e.InstrumentID, mc.Type).Inc()
 		slog.Warn("notifier: messaging send failed",
@@ -195,13 +212,15 @@ func (n *Notifier) doMessaging(ctx context.Context, e Event, mc config.Messaging
 	}
 	if sent {
 		n.metrics.NotificationsSentTotal.WithLabelValues(e.InstrumentID, mc.Type, e.EventName).Inc()
+		n.metrics.NotificationSendDuration.WithLabelValues(mc.Type).Observe(dur.Seconds())
 	} else {
 		n.metrics.NotificationsSuppressedTotal.WithLabelValues(e.InstrumentID, mc.Type, e.EventName).Inc()
 	}
 }
 
+// doSCM dispatches to one SCM backend and returns the resulting issue URL (empty on error).
 func (n *Notifier) doSCM(ctx context.Context, e Event, sc config.SCMCall,
-	backend SCMBackend, fp, inspectorURL string) {
+	backend SCMBackend, fp, inspectorURL string) string {
 
 	title := fmt.Sprintf("[%s] %s", e.InstrumentID, truncate(e.Message, 80))
 	if e.Stage != "" {
@@ -209,7 +228,7 @@ func (n *Notifier) doSCM(ctx context.Context, e Event, sc config.SCMCall,
 	}
 
 	start := time.Now()
-	err := backend.Dispatch(ctx, SCMParams{
+	issueURL, err := backend.Dispatch(ctx, SCMParams{
 		Token:         sc.Token,
 		Repo:          sc.Repo,
 		Labels:        sc.Labels,
@@ -230,10 +249,11 @@ func (n *Notifier) doSCM(ctx context.Context, e Event, sc config.SCMCall,
 		n.metrics.NotificationErrorsTotal.WithLabelValues(e.InstrumentID, sc.Type).Inc()
 		slog.Warn("notifier: SCM dispatch failed",
 			"type", sc.Type, "instrument", e.InstrumentID, "event", e.EventName, "error", err)
-		return
+		return ""
 	}
 	n.metrics.NotificationsSentTotal.WithLabelValues(e.InstrumentID, sc.Type, e.EventName).Inc()
 	n.metrics.NotificationSendDuration.WithLabelValues(sc.Type).Observe(dur.Seconds())
+	return issueURL
 }
 
 func (n *Notifier) flushDigests(ctx context.Context) {
@@ -253,7 +273,26 @@ func (n *Notifier) flushDigests(ctx context.Context) {
 
 // ── Message builder ───────────────────────────────────────────────────────────
 
-func (n *Notifier) buildMessage(e Event, messageTemplate, inspectorURL, errEntitiesURL string) string {
+// buildMsg constructs a Message for messaging backends.
+// issueURLs contains GitHub/GitLab issue URLs already created for this event.
+func (n *Notifier) buildMsg(e Event, messageTemplate, inspectorURL, errEntitiesURL string, issueURLs []string) Message {
+	text := n.buildText(e, messageTemplate, inspectorURL, errEntitiesURL)
+	return Message{
+		Text:         text,
+		InstrumentID: e.InstrumentID,
+		EventName:    e.EventName,
+		EntityID:     e.EntityID,
+		Body:         e.Message,
+		Stage:        e.Stage,
+		InspectorURL: inspectorURL,
+		ErrDashURL:   errEntitiesURL,
+		IssueURLs:    issueURLs,
+		Metadata:     e.Metadata,
+	}
+}
+
+// buildText renders a plain-text representation of the event (used as digest fallback).
+func (n *Notifier) buildText(e Event, messageTemplate, inspectorURL, errEntitiesURL string) string {
 	if messageTemplate != "" {
 		t, err := template.New("").Parse(messageTemplate)
 		if err == nil {
@@ -275,12 +314,22 @@ func (n *Notifier) buildMessage(e Event, messageTemplate, inspectorURL, errEntit
 	if e.Stage != "" {
 		fmt.Fprintf(&sb, "  (stage: %s)", e.Stage)
 	}
-	if len(e.Metadata) > 0 && e.EventName != "helix.error" {
-		var pairs []string
-		for k, v := range e.Metadata {
-			pairs = append(pairs, fmt.Sprintf("%s: %s", k, v))
+	// Append extra metadata fields (sorted for deterministic output).
+	if len(e.Metadata) > 0 {
+		keys := make([]string, 0, len(e.Metadata))
+		for k := range e.Metadata {
+			if k != "message" { // "message" is already in Body
+				keys = append(keys, k)
+			}
 		}
-		fmt.Fprintf(&sb, "\n%s", strings.Join(pairs, " · "))
+		sort.Strings(keys)
+		var pairs []string
+		for _, k := range keys {
+			pairs = append(pairs, fmt.Sprintf("%s: %s", k, e.Metadata[k]))
+		}
+		if len(pairs) > 0 {
+			fmt.Fprintf(&sb, "\n%s", strings.Join(pairs, " · "))
+		}
 	}
 	fmt.Fprintf(&sb, "\nEntity: %s\n🔍 Inspect: %s\n📊 Error Entities: %s",
 		e.EntityID, inspectorURL, errEntitiesURL)

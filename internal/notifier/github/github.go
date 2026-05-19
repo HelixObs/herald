@@ -41,9 +41,10 @@ func NewWithBaseURL(db IssueDB, apiBase string) *Client {
 }
 
 // Dispatch creates a new GitHub issue or updates the body of an existing one.
+// Returns the URL of the created or updated issue.
 // On recurrence after a closed issue: reopens with a single state-change comment,
 // then updates the body. No other comments are ever added.
-func (c *Client) Dispatch(ctx context.Context, p notifier.SCMParams) error {
+func (c *Client) Dispatch(ctx context.Context, p notifier.SCMParams) (string, error) {
 	ts := oauth2.StaticTokenSource(&oauth2.Token{AccessToken: p.Token})
 	tc := oauth2.NewClient(ctx, ts)
 	client := gh.NewClient(tc)
@@ -55,13 +56,13 @@ func (c *Client) Dispatch(ctx context.Context, p notifier.SCMParams) error {
 
 	parts := strings.SplitN(p.Repo, "/", 2)
 	if len(parts) != 2 {
-		return fmt.Errorf("invalid repo format: %s", p.Repo)
+		return "", fmt.Errorf("invalid repo format: %s", p.Repo)
 	}
 	owner, repo := parts[0], parts[1]
 
 	record, err := c.db.FindNotificationIssue(ctx, p.InstrumentID, p.Fingerprint, p.Repo)
 	if err != nil {
-		return fmt.Errorf("look up existing issue: %w", err)
+		return "", fmt.Errorf("look up existing issue: %w", err)
 	}
 
 	if record == nil {
@@ -70,7 +71,7 @@ func (c *Client) Dispatch(ctx context.Context, p notifier.SCMParams) error {
 	return c.updateIssue(ctx, client, owner, repo, record, p)
 }
 
-func (c *Client) createIssue(ctx context.Context, client *gh.Client, owner, repo string, p notifier.SCMParams) error {
+func (c *Client) createIssue(ctx context.Context, client *gh.Client, owner, repo string, p notifier.SCMParams) (string, error) {
 	now := time.Now()
 	labels := p.Labels
 	req := &gh.IssueRequest{
@@ -82,14 +83,15 @@ func (c *Client) createIssue(ctx context.Context, client *gh.Client, owner, repo
 		return client.Issues.Create(ctx, owner, repo, req)
 	})
 	if err != nil {
-		return fmt.Errorf("create issue: %w", err)
+		return "", fmt.Errorf("create issue: %w", err)
 	}
 	slog.Info("github: created issue", "repo", p.Repo, "number", issue.GetNumber(), "fingerprint", p.Fingerprint)
-	return c.db.UpsertNotificationIssue(ctx, p.InstrumentID, p.Fingerprint, p.Repo, issue.GetNumber(), p.EntityID)
+	issueURL := fmt.Sprintf("https://github.com/%s/%s/issues/%d", owner, repo, issue.GetNumber())
+	return issueURL, c.db.UpsertNotificationIssue(ctx, p.InstrumentID, p.Fingerprint, p.Repo, issue.GetNumber(), p.EntityID)
 }
 
 func (c *Client) updateIssue(ctx context.Context, client *gh.Client, owner, repo string,
-	record *db.NotificationIssue, p notifier.SCMParams) error {
+	record *db.NotificationIssue, p notifier.SCMParams) (string, error) {
 
 	issue, resp, err := c.retry(func() (*gh.Issue, *gh.Response, error) {
 		return client.Issues.Get(ctx, owner, repo, record.GithubIssueNumber)
@@ -102,7 +104,7 @@ func (c *Client) updateIssue(ctx context.Context, client *gh.Client, owner, repo
 			}
 			return c.createIssue(ctx, client, owner, repo, p)
 		}
-		return fmt.Errorf("get issue: %w", err)
+		return "", fmt.Errorf("get issue: %w", err)
 	}
 
 	now := time.Now()
@@ -120,7 +122,7 @@ func (c *Client) updateIssue(ctx context.Context, client *gh.Client, owner, repo
 		if _, _, err := c.retry(func() (*gh.Issue, *gh.Response, error) {
 			return client.Issues.Edit(ctx, owner, repo, record.GithubIssueNumber, &gh.IssueRequest{State: &open})
 		}); err != nil {
-			return fmt.Errorf("reopen issue: %w", err)
+			return "", fmt.Errorf("reopen issue: %w", err)
 		}
 		ts := now.UTC().Format("2006-01-02 15:04:05 UTC")
 		reopenComment := fmt.Sprintf(
@@ -138,11 +140,12 @@ func (c *Client) updateIssue(ctx context.Context, client *gh.Client, owner, repo
 	if _, _, err := c.retry(func() (*gh.Issue, *gh.Response, error) {
 		return client.Issues.Edit(ctx, owner, repo, record.GithubIssueNumber, &gh.IssueRequest{Body: gh.String(updatedBody)})
 	}); err != nil {
-		return fmt.Errorf("update issue body: %w", err)
+		return "", fmt.Errorf("update issue body: %w", err)
 	}
 
 	slog.Info("github: updated issue body", "repo", p.Repo, "number", record.GithubIssueNumber, "occurrences", newCount)
-	return c.db.UpsertNotificationIssue(ctx, p.InstrumentID, p.Fingerprint, p.Repo, record.GithubIssueNumber, p.EntityID)
+	issueURL := fmt.Sprintf("https://github.com/%s/%s/issues/%d", owner, repo, record.GithubIssueNumber)
+	return issueURL, c.db.UpsertNotificationIssue(ctx, p.InstrumentID, p.Fingerprint, p.Repo, record.GithubIssueNumber, p.EntityID)
 }
 
 // buildBody renders the issue body with a running summary and up to 10 recent entities.

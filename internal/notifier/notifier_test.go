@@ -40,11 +40,11 @@ func (m *mockSilenceDB) ActiveSilences(_ context.Context, _ string) ([]db.Silenc
 // stubMessaging records calls and optionally blocks until released.
 type stubMessaging struct {
 	mu      sync.Mutex
-	sends   []string
+	sends   []notifier.Message
 	blocked chan struct{} // if non-nil, Send blocks until closed
 }
 
-func (s *stubMessaging) Send(_ context.Context, _, _, msg string, _, _ int) (bool, error) {
+func (s *stubMessaging) Send(_ context.Context, _, _ string, msg notifier.Message, _, _ int) (bool, error) {
 	if s.blocked != nil {
 		<-s.blocked
 	}
@@ -62,26 +62,28 @@ func (s *stubMessaging) count() int {
 	return len(s.sends)
 }
 
-func (s *stubMessaging) last() string {
+func (s *stubMessaging) last() notifier.Message {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if len(s.sends) == 0 {
-		return ""
+		return notifier.Message{}
 	}
 	return s.sends[len(s.sends)-1]
 }
 
-// stubSCM records dispatch calls.
+// stubSCM records dispatch calls and returns a fake issue URL.
 type stubSCM struct {
 	mu         sync.Mutex
 	dispatches int
+	returnURL  string // URL to return from Dispatch (empty string → no URL)
 }
 
-func (s *stubSCM) Dispatch(_ context.Context, _ notifier.SCMParams) error {
+func (s *stubSCM) Dispatch(_ context.Context, _ notifier.SCMParams) (string, error) {
 	s.mu.Lock()
 	s.dispatches++
+	u := s.returnURL
 	s.mu.Unlock()
-	return nil
+	return u, nil
 }
 
 // yamlLoader creates a config.Loader backed by a temp dir with the given YAML.
@@ -236,7 +238,49 @@ notifications:
 	}
 }
 
-// ── buildMessage tests ────────────────────────────────────────────────────────
+// ── SCM → messaging ordering test ─────────────────────────────────────────────
+
+func TestDispatch_IssueURLPassedToMessaging(t *testing.T) {
+	t.Setenv("SCM_SLACK_WEBHOOK", "https://hooks.slack.com/test")
+	t.Setenv("SCM_GITHUB_TOKEN", "ghp_test")
+	cfg := yamlLoader(t, `
+instrument_id: SCM_INST
+notifications:
+  slack_webhook_env: SCM_SLACK_WEBHOOK
+  github_token_env: SCM_GITHUB_TOKEN
+  events:
+    helix.error:
+      slack:
+        channel: "#alerts"
+        sample_window_seconds: 60
+        max_per_window: 5
+      github:
+        repo: owner/repo
+        labels: [bug]
+        on_recurrence_after_close: reopen
+`)
+	sl := silence.New(noopSilenceDB{}, time.Minute)
+	msgStub := &stubMessaging{}
+	scmStub := &stubSCM{returnURL: "https://github.com/owner/repo/issues/99"}
+	n := notifier.New(cfg, sl, newTestMetrics(), 10, "http://ui", "http://grafana")
+	n.RegisterMessaging("slack", msgStub)
+	n.RegisterSCM("github", scmStub)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go n.Start(ctx)
+
+	n.Send(notifier.Event{InstrumentID: "SCM_INST", EventName: "helix.error", EntityID: "e1", Message: "disk full"})
+
+	waitFor(t, time.Second, func() bool { return msgStub.count() == 1 })
+
+	msg := msgStub.last()
+	if len(msg.IssueURLs) != 1 || msg.IssueURLs[0] != "https://github.com/owner/repo/issues/99" {
+		t.Errorf("expected issue URL in message, got %v", msg.IssueURLs)
+	}
+}
+
+// ── buildMsg tests ────────────────────────────────────────────────────────────
 
 func TestBuildMessage_ContainsExpectedFields(t *testing.T) {
 	t.Setenv("BLDMSG_SLACK_WEBHOOK", "https://hooks.slack.com/test")
@@ -271,10 +315,23 @@ notifications:
 	waitFor(t, 500*time.Millisecond, func() bool { return stub.count() == 1 })
 	msg := stub.last()
 
-	for _, want := range []string{"[BLD]", "helix.error", "disk full", "ent-1", "Inspect", "hdf5_archiver"} {
-		if !strings.Contains(msg, want) {
-			t.Errorf("expected message to contain %q, got:\n%s", want, msg)
-		}
+	if msg.InstrumentID != "BLD" {
+		t.Errorf("expected InstrumentID=BLD, got %q", msg.InstrumentID)
+	}
+	if msg.EventName != "helix.error" {
+		t.Errorf("expected EventName=helix.error, got %q", msg.EventName)
+	}
+	if msg.Body != "disk full" {
+		t.Errorf("expected Body=%q, got %q", "disk full", msg.Body)
+	}
+	if msg.EntityID != "ent-1" {
+		t.Errorf("expected EntityID=ent-1, got %q", msg.EntityID)
+	}
+	if msg.Stage != "hdf5_archiver" {
+		t.Errorf("expected Stage=hdf5_archiver, got %q", msg.Stage)
+	}
+	if !strings.Contains(msg.InspectorURL, "ent-1") {
+		t.Errorf("expected InspectorURL to contain entity ID, got %q", msg.InspectorURL)
 	}
 }
 
@@ -311,8 +368,54 @@ notifications:
 	waitFor(t, 500*time.Millisecond, func() bool { return stub.count() == 1 })
 	msg := stub.last()
 
-	if !strings.Contains(msg, "Error: disk full") {
-		t.Errorf("expected template rendered in message, got:\n%s", msg)
+	if !strings.Contains(msg.Text, "Error: disk full") {
+		t.Errorf("expected template rendered in Text, got:\n%s", msg.Text)
+	}
+}
+
+func TestBuildMessage_MetadataInMessage(t *testing.T) {
+	t.Setenv("META_SLACK_WEBHOOK", "https://hooks.slack.com/test")
+	cfg := yamlLoader(t, `
+instrument_id: META
+notifications:
+  slack_webhook_env: META_SLACK_WEBHOOK
+  events:
+    helix.error:
+      slack:
+        channel: "#alerts"
+        sample_window_seconds: 60
+        max_per_window: 5
+`)
+	sl := silence.New(noopSilenceDB{}, time.Minute)
+	stub := &stubMessaging{}
+	n := notifier.New(cfg, sl, newTestMetrics(), 10, "http://ui", "http://grafana")
+	n.RegisterMessaging("slack", stub)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go n.Start(ctx)
+
+	n.Send(notifier.Event{
+		InstrumentID: "META",
+		EventName:    "helix.error",
+		EntityID:     "ent-5",
+		Message:      "NFS mount failed",
+		Metadata:     map[string]string{"process": "hdf5_archiver_v2", "message": "NFS mount failed"},
+	})
+
+	waitFor(t, 500*time.Millisecond, func() bool { return stub.count() == 1 })
+	msg := stub.last()
+
+	if msg.Metadata["process"] != "hdf5_archiver_v2" {
+		t.Errorf("expected Metadata[process]=hdf5_archiver_v2, got %v", msg.Metadata)
+	}
+	// "message" key should not appear in Text (it duplicates Body).
+	if strings.Contains(msg.Text, "message: NFS") {
+		t.Errorf("Text should not duplicate the 'message' metadata key, got:\n%s", msg.Text)
+	}
+	// "process" key should appear in Text.
+	if !strings.Contains(msg.Text, "process") {
+		t.Errorf("expected Text to contain process metadata, got:\n%s", msg.Text)
 	}
 }
 

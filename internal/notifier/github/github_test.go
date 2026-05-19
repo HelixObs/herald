@@ -120,8 +120,12 @@ func TestDispatch_CreatesIssue(t *testing.T) {
 	fdb := &fakeDB{}
 	c := ghbackend.NewWithBaseURL(fdb, srv.URL+"/api/v3/")
 
-	if err := c.Dispatch(context.Background(), baseParams()); err != nil {
+	issueURL, err := c.Dispatch(context.Background(), baseParams())
+	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(issueURL, "42") {
+		t.Errorf("expected issue URL to contain issue number 42, got %q", issueURL)
 	}
 	if issue.number != 42 {
 		t.Errorf("expected issue 42 to be created, got %d", issue.number)
@@ -141,7 +145,7 @@ func TestDispatch_UpdatesBodyOnRecurrence(t *testing.T) {
 	}}
 	c := ghbackend.NewWithBaseURL(fdb, srv.URL+"/api/v3/")
 
-	if err := c.Dispatch(context.Background(), baseParams()); err != nil {
+	if _, err := c.Dispatch(context.Background(), baseParams()); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if issue.body == "" {
@@ -167,7 +171,7 @@ func TestDispatch_ReopensClosedIssue(t *testing.T) {
 
 	p := baseParams()
 	p.OnRecurrence = "reopen"
-	if err := c.Dispatch(context.Background(), p); err != nil {
+	if _, err := c.Dispatch(context.Background(), p); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if issue.state != "open" {
@@ -187,7 +191,7 @@ func TestDispatch_NewIssueOnClosedWhenConfigured(t *testing.T) {
 
 	p := baseParams()
 	p.OnRecurrence = "new_issue"
-	if err := c.Dispatch(context.Background(), p); err != nil {
+	if _, err := c.Dispatch(context.Background(), p); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if fdb.deletes != 1 {
@@ -199,7 +203,7 @@ func TestDispatch_InvalidRepoFormat(t *testing.T) {
 	c := ghbackend.New(&fakeDB{})
 	p := baseParams()
 	p.Repo = "noslash"
-	if err := c.Dispatch(context.Background(), p); err == nil {
+	if _, err := c.Dispatch(context.Background(), p); err == nil {
 		t.Error("expected error for invalid repo format")
 	}
 }
