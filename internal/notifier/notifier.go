@@ -40,15 +40,16 @@ type Event struct {
 
 // Notifier wires config, silence, and registered backends into a dispatch loop.
 type Notifier struct {
-	ch        chan Event
-	cfg       *config.Loader
-	silence   *silence.Store
-	messaging map[string]MessagingBackend
-	scm       map[string]SCMBackend
-	metrics   *metrics.Metrics
-	uiBase    string
-	grafana   string
-	sem       map[string]chan struct{} // per "type" and "type_scm"
+	ch             chan Event
+	cfg            *config.Loader
+	silence        *silence.Store
+	messaging      map[string]MessagingBackend
+	scm            map[string]SCMBackend
+	metrics        *metrics.Metrics
+	uiBase         string
+	grafana        string
+	sem            map[string]chan struct{} // per "type" and "type_scm"
+	digestInterval time.Duration
 }
 
 // New creates a Notifier. Backends must be registered via RegisterMessaging / RegisterSCM
@@ -61,17 +62,21 @@ func New(
 	uiBaseURL, grafanaURL string,
 ) *Notifier {
 	return &Notifier{
-		ch:        make(chan Event, bufSize),
-		cfg:       cfg,
-		silence:   sl,
-		messaging: make(map[string]MessagingBackend),
-		scm:       make(map[string]SCMBackend),
-		metrics:   m,
-		uiBase:    strings.TrimRight(uiBaseURL, "/"),
-		grafana:   strings.TrimRight(grafanaURL, "/"),
-		sem:       make(map[string]chan struct{}),
+		ch:             make(chan Event, bufSize),
+		cfg:            cfg,
+		silence:        sl,
+		messaging:      make(map[string]MessagingBackend),
+		scm:            make(map[string]SCMBackend),
+		metrics:        m,
+		uiBase:         strings.TrimRight(uiBaseURL, "/"),
+		grafana:        strings.TrimRight(grafanaURL, "/"),
+		sem:            make(map[string]chan struct{}),
+		digestInterval: 30 * time.Second,
 	}
 }
+
+// SetDigestInterval overrides the default 30-second flush ticker. Intended for tests.
+func (n *Notifier) SetDigestInterval(d time.Duration) { n.digestInterval = d }
 
 // RegisterMessaging registers a messaging backend (e.g. "slack", "discord").
 // Call before Start.
@@ -100,7 +105,7 @@ func (n *Notifier) Send(e Event) {
 
 // Start runs the dispatch loop until ctx is cancelled.
 func (n *Notifier) Start(ctx context.Context) {
-	digestTicker := time.NewTicker(30 * time.Second)
+	digestTicker := time.NewTicker(n.digestInterval)
 	defer digestTicker.Stop()
 
 	for {

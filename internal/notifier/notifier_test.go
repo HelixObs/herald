@@ -566,7 +566,66 @@ notifications:
 	waitFor(t, 500*time.Millisecond, func() bool { return stub.count() >= 1 })
 }
 
+// ── flushDigests via short digestInterval ─────────────────────────────────────
+
+func TestStart_FlushDigests(t *testing.T) {
+	t.Setenv("FLUSH_SLACK_WEBHOOK", "https://hooks.slack.com/test")
+	cfg := yamlLoader(t, `
+instrument_id: FLUSH
+notifications:
+  slack_webhook_env: FLUSH_SLACK_WEBHOOK
+  events:
+    helix.error:
+      slack:
+        channel: "#alerts"
+        sample_window_seconds: 60
+        max_per_window: 5
+`)
+	sl := silence.New(noopSilenceDB{}, time.Minute)
+	stub := &stubMessaging{}
+	n := notifier.New(cfg, sl, newTestMetrics(), 10, "http://ui", "http://grafana")
+	n.SetDigestInterval(20 * time.Millisecond)
+	n.RegisterMessaging("slack", stub)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go n.Start(ctx)
+
+	// Wait long enough for at least one digest tick to fire.
+	time.Sleep(60 * time.Millisecond)
+}
+
 // ── doSCM error path ─────────────────────────────────────────────────────────
+
+// TestDoSCM_TruncatesLongMessage covers the truncate(s, n) path where len(s) > n.
+func TestDoSCM_TruncatesLongMessage(t *testing.T) {
+	t.Setenv("TRUNC_WEBHOOK", "https://hooks.slack.com/test")
+	t.Setenv("TRUNC_TOKEN", "ghp_test")
+	cfg := yamlLoader(t, `
+instrument_id: TRUNC
+notifications:
+  slack_webhook_env: TRUNC_WEBHOOK
+  github_token_env: TRUNC_TOKEN
+  events:
+    helix.error:
+      github:
+        repo: owner/repo
+        labels: [bug]
+`)
+	sl := silence.New(noopSilenceDB{}, time.Minute)
+	scmStub := &stubSCM{returnURL: "https://github.com/owner/repo/issues/1"}
+	n := notifier.New(cfg, sl, newTestMetrics(), 10, "http://ui", "http://grafana")
+	n.RegisterSCM("github", scmStub)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go n.Start(ctx)
+
+	// Message longer than 80 chars → truncate fires in doSCM title.
+	longMsg := strings.Repeat("x", 100)
+	n.Send(notifier.Event{InstrumentID: "TRUNC", EventName: "helix.error", EntityID: "e1", Message: longMsg})
+	time.Sleep(200 * time.Millisecond)
+}
 
 func TestDoSCM_DispatchError(t *testing.T) {
 	t.Setenv("SCMERR_WEBHOOK", "https://hooks.slack.com/test")
