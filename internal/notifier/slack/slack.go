@@ -134,9 +134,11 @@ func buildBlockKit(fp string, msg notifier.Message) []byte {
 	if len(msg.Metadata) > 0 {
 		keys := make([]string, 0, len(msg.Metadata))
 		for k := range msg.Metadata {
-			if k != "message" {
-				keys = append(keys, k)
+			// skip fields already promoted to dedicated message fields
+			if k == "message" || k == "stage" || k == "exception.message" {
+				continue
 			}
+			keys = append(keys, k)
 		}
 		sort.Strings(keys)
 		for _, k := range keys {

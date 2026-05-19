@@ -318,9 +318,11 @@ func (n *Notifier) buildText(e Event, messageTemplate, inspectorURL, errEntities
 	if len(e.Metadata) > 0 {
 		keys := make([]string, 0, len(e.Metadata))
 		for k := range e.Metadata {
-			if k != "message" { // "message" is already in Body
-				keys = append(keys, k)
+			// skip fields already promoted to dedicated Event fields
+			if k == "message" || k == "stage" || k == "exception.message" {
+				continue
 			}
+			keys = append(keys, k)
 		}
 		sort.Strings(keys)
 		var pairs []string
