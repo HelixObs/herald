@@ -198,3 +198,16 @@ func TestExportMixedHelixAndPlainSpans(t *testing.T) {
 		t.Errorf("expected 2 spans forwarded, got %d", len(spans))
 	}
 }
+
+func TestDial(t *testing.T) {
+	s := store.New(1_000, nil)
+	m := metrics.New(prometheus.NewRegistry())
+	icp := interceptor.New(s, nil, m)
+	r, err := receiver.Dial(icp, "localhost:1")
+	if err != nil {
+		t.Fatalf("Dial returned unexpected error: %v", err)
+	}
+	if r == nil {
+		t.Fatal("Dial returned nil Receiver")
+	}
+}

@@ -1,16 +1,22 @@
 package interceptor_test
 
 import (
+	"context"
+	"fmt"
+	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	collectortracepb "go.opentelemetry.io/proto/otlp/collector/trace/v1"
 	commonpb "go.opentelemetry.io/proto/otlp/common/v1"
 	tracepb "go.opentelemetry.io/proto/otlp/trace/v1"
 
+	"github.com/HelixObs/gateway/internal/db"
 	"github.com/HelixObs/gateway/internal/interceptor"
 	"github.com/HelixObs/gateway/internal/metrics"
+	"github.com/HelixObs/gateway/internal/notifier"
 	"github.com/HelixObs/gateway/internal/store"
 )
 
@@ -539,4 +545,130 @@ func TestHelixEventBoolAttribute(t *testing.T) {
 		},
 	}}
 	icp.Process(makeReq(span))
+}
+
+// ── Integration tests (require TEST_DB_URL) ───────────────────────────────────
+
+func TestInterceptorWithDB(t *testing.T) {
+	url := os.Getenv("TEST_DB_URL")
+	if url == "" {
+		t.Skip("TEST_DB_URL not set")
+	}
+	dbStore, err := db.New(context.Background(), url, nil)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer dbStore.Close()
+
+	reg := prometheus.NewRegistry()
+	m := metrics.New(reg)
+	s := store.New(10_000, m)
+	icp := interceptor.New(s, dbStore, m)
+
+	// entity span → entities table
+	entityID := fmt.Sprintf("icp-test-%d", time.Now().UnixNano())
+	icp.Process(makeReq(makeSpan("correlator", map[string]string{
+		"helix.entity.id":     entityID,
+		"helix.instrument.id": "TEST",
+	})))
+
+	// operation span → entity_operations table
+	opID := fmt.Sprintf("icp-op-%d", time.Now().UnixNano())
+	icp.Process(makeReq(makeSpan("hdf5-conversion", map[string]string{
+		"helix.entity.id":          opID,
+		"helix.instrument.id":      "TEST",
+		"helix.entity.is_operation": "true",
+	})))
+
+	// span with helix.error event → entity_events table
+	evID := fmt.Sprintf("icp-ev-%d", time.Now().UnixNano())
+	evSpan := makeSpan("correlator", map[string]string{
+		"helix.entity.id":     evID,
+		"helix.instrument.id": "TEST",
+	})
+	evSpan.Events = []*tracepb.Span_Event{
+		{
+			Name:         "helix.error",
+			TimeUnixNano: 1_000_000_000,
+			Attributes:   []*commonpb.KeyValue{strAttr("msg", "test error")},
+		},
+	}
+	icp.Process(makeReq(evSpan))
+
+	// span with parent that was already stored → parent resolution path
+	parentID := fmt.Sprintf("icp-parent-%d", time.Now().UnixNano())
+	icp.Process(makeReq(makeSpan("correlator", map[string]string{
+		"helix.entity.id":     parentID,
+		"helix.instrument.id": "TEST",
+	})))
+	childID := fmt.Sprintf("icp-child-%d", time.Now().UnixNano())
+	icp.Process(makeReq(makeSpan("classifier", map[string]string{
+		"helix.entity.id":     childID,
+		"helix.instrument.id": "TEST",
+		"helix.parent.ids":    parentID,
+	})))
+
+	// allow goroutines to finish writing
+	time.Sleep(400 * time.Millisecond)
+}
+
+func TestInterceptorWithDBAndNotifier(t *testing.T) {
+	url := os.Getenv("TEST_DB_URL")
+	if url == "" {
+		t.Skip("TEST_DB_URL not set")
+	}
+	dbStore, err := db.New(context.Background(), url, nil)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer dbStore.Close()
+
+	reg := prometheus.NewRegistry()
+	m := metrics.New(reg)
+	s := store.New(10_000, m)
+	icp := interceptor.New(s, dbStore, m)
+
+	// non-nil notifier exercises the icp.notifier.Send() path
+	n := notifier.New(nil, nil, m, 100, "", "")
+	icp.WithNotifier(n)
+
+	evID := fmt.Sprintf("icp-notifier-%d", time.Now().UnixNano())
+	evSpan := makeSpan("correlator", map[string]string{
+		"helix.entity.id":     evID,
+		"helix.instrument.id": "TEST",
+	})
+	evSpan.Events = []*tracepb.Span_Event{
+		{Name: "helix.event.detection_confirmed", TimeUnixNano: 1_000_000_000},
+	}
+	icp.Process(makeReq(evSpan))
+
+	time.Sleep(300 * time.Millisecond)
+}
+
+// Verify that multiple comma-separated unknown parent IDs are all resolved
+// (or counted as misses) and the span is processed without panic.
+func TestInterceptorMultipleUnknownParents(t *testing.T) {
+	url := os.Getenv("TEST_DB_URL")
+	if url == "" {
+		t.Skip("TEST_DB_URL not set")
+	}
+	dbStore, err := db.New(context.Background(), url, nil)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer dbStore.Close()
+
+	reg := prometheus.NewRegistry()
+	m := metrics.New(reg)
+	s := store.New(10_000, m)
+	icp := interceptor.New(s, dbStore, m)
+
+	childID := fmt.Sprintf("icp-multi-parent-%d", time.Now().UnixNano())
+	icp.Process(makeReq(makeSpan("classifier", map[string]string{
+		"helix.entity.id":     childID,
+		"helix.instrument.id": "TEST",
+		"helix.parent.ids":    strings.Join([]string{"unknown-p1", "unknown-p2", "unknown-p3"}, ","),
+	})))
+
+	time.Sleep(300 * time.Millisecond)
 }

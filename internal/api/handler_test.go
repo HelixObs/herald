@@ -400,9 +400,9 @@ func TestMonitorBinsUnknownPlot(t *testing.T) {
 func TestMonitorBinsWindowTooSmall(t *testing.T) {
 	h := api.New(&mockQuerier{}, nil, nil)
 	rec := httptest.NewRecorder()
-	// Window = 1 second = 1000ms — below the 5-minute minimum.
+	// from_ms=1000000, to_ms=1001000 → 1-second window, below the 5-minute minimum.
 	req := httptest.NewRequest(http.MethodGet,
-		"/api/v1/monitor/bins?plot=chime_dm_time&instrument=CHIME&from_ms=0&to_ms=1000", nil)
+		"/api/v1/monitor/bins?plot=chime_dm_time&instrument=CHIME&from_ms=1000000&to_ms=1001000", nil)
 	h.ServeHTTP(rec, req)
 	if rec.Code != http.StatusBadRequest {
 		t.Errorf("expected 400 for window too small, got %d", rec.Code)
@@ -412,11 +412,184 @@ func TestMonitorBinsWindowTooSmall(t *testing.T) {
 func TestMonitorBinsWindowTooLarge(t *testing.T) {
 	h := api.New(&mockQuerier{}, nil, nil)
 	rec := httptest.NewRecorder()
-	// 25 hours in milliseconds = 90_000_000ms.
+	// from_ms=1000000, to_ms=1000000+90_000_000 → 25-hour window, above the 24-hour max.
 	req := httptest.NewRequest(http.MethodGet,
-		"/api/v1/monitor/bins?plot=chime_dm_time&instrument=CHIME&from_ms=0&to_ms=90000000", nil)
+		"/api/v1/monitor/bins?plot=chime_dm_time&instrument=CHIME&from_ms=1000000&to_ms=91000000", nil)
 	h.ServeHTTP(rec, req)
 	if rec.Code != http.StatusBadRequest {
 		t.Errorf("expected 400 for window too large, got %d", rec.Code)
+	}
+}
+
+// ── mockMonitorStore ──────────────────────────────────────────────────────────
+
+type mockMonitorStore struct {
+	rows []db.RawEntityRow
+	err  error
+}
+
+func (m *mockMonitorStore) QueryEntitiesRaw(_ context.Context, _ string, _, _ int64, _ string) ([]db.RawEntityRow, error) {
+	return m.rows, m.err
+}
+
+// ── monitorBins success + error paths ─────────────────────────────────────────
+
+func TestMonitorBinsNilStore(t *testing.T) {
+	// Monitor store is nil — handler returns 500 after passing all validation.
+	h := api.New(&mockQuerier{}, nil, &noopMetrics{})
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet,
+		"/api/v1/monitor/bins?plot=chime_dm_time&instrument=CHIME&from_ms=1000000&to_ms=1600000", nil)
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusInternalServerError {
+		t.Errorf("expected 500 for nil monitor store, got %d", rec.Code)
+	}
+}
+
+func TestMonitorBinsStoreError(t *testing.T) {
+	ms := &mockMonitorStore{err: errors.New("db error")}
+	h := api.New(&mockQuerier{}, ms, &noopMetrics{})
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet,
+		"/api/v1/monitor/bins?plot=chime_dm_time&instrument=CHIME&from_ms=1000000&to_ms=1600000", nil)
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusInternalServerError {
+		t.Errorf("expected 500 for store error, got %d", rec.Code)
+	}
+}
+
+func TestMonitorBinsSuccess(t *testing.T) {
+	ms := &mockMonitorStore{rows: []db.RawEntityRow{}}
+	h := api.New(&mockQuerier{}, ms, &noopMetrics{})
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet,
+		"/api/v1/monitor/bins?plot=chime_dm_time&instrument=CHIME&from_ms=1000000&to_ms=1600000", nil)
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if ct := rec.Header().Get("Content-Type"); !strings.Contains(ct, "application/json") {
+		t.Errorf("expected JSON content-type, got %q", ct)
+	}
+}
+
+func TestMonitorBinsSuccessWithYOverrides(t *testing.T) {
+	// y_min=100 → yMinActual override; y_max=5000 → yMaxActual override.
+	ms := &mockMonitorStore{rows: []db.RawEntityRow{}}
+	h := api.New(&mockQuerier{}, ms, nil)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet,
+		"/api/v1/monitor/bins?plot=chime_dm_time&instrument=CHIME&from_ms=1000000&to_ms=1600000&y_min=100&y_max=5000", nil)
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestMonitorBinsClampExtremes(t *testing.T) {
+	// t_bins=0 → clamp to min (1); y_bins=9999 → clamp to max (4096).
+	// Request still returns 500 (nil monitor) but clamp branches are hit.
+	h := api.New(&mockQuerier{}, nil, nil)
+	for _, params := range []string{
+		"t_bins=0&y_bins=100",    // clamp min branch for t_bins
+		"t_bins=9999&y_bins=100", // clamp max branch for t_bins
+	} {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet,
+			"/api/v1/monitor/bins?plot=chime_dm_time&instrument=CHIME&from_ms=1000000&to_ms=1600000&"+params, nil)
+		h.ServeHTTP(rec, req)
+		// nil monitor → 500; the clamp calls happen before this check
+		if rec.Code != http.StatusInternalServerError {
+			t.Errorf("params=%s: expected 500 (nil monitor), got %d", params, rec.Code)
+		}
+	}
+}
+
+func TestMonitorBinsParseHelpers(t *testing.T) {
+	h := api.New(&mockQuerier{}, nil, nil)
+
+	// parseInt error: from_ms=bad → defaults to 0 → 400 missing params.
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet,
+		"/api/v1/monitor/bins?plot=chime_dm_time&instrument=CHIME&from_ms=bad&to_ms=1600000", nil)
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 for bad from_ms, got %d", rec.Code)
+	}
+
+	// parseFloat error: y_max=notafloat → defaults to 0 (request reaches nil monitor → 500).
+	ms := &mockMonitorStore{rows: []db.RawEntityRow{}}
+	h2 := api.New(&mockQuerier{}, ms, nil)
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet,
+		"/api/v1/monitor/bins?plot=chime_dm_time&instrument=CHIME&from_ms=1000000&to_ms=1600000&y_max=notafloat", nil)
+	h2.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Errorf("expected 200 even with unparseable y_max, got %d", rec.Code)
+	}
+}
+
+// ── entityGraph / entityOperations with metrics ───────────────────────────────
+
+func TestEntityGraphWithMetrics(t *testing.T) {
+	g := &db.EntityGraph{Nodes: []db.GraphNode{}, Edges: []db.GraphEdge{}}
+	h := api.New(&mockQuerier{graph: g}, nil, &noopMetrics{})
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/entity/x/graph", nil)
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d", rec.Code)
+	}
+}
+
+func TestEntityGraphErrorWithMetrics(t *testing.T) {
+	h := api.New(&mockQuerier{err: errors.New("db down")}, nil, &noopMetrics{})
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/entity/x/graph", nil)
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusInternalServerError {
+		t.Errorf("expected 500, got %d", rec.Code)
+	}
+}
+
+func TestEntityGraphNotFoundWithMetrics(t *testing.T) {
+	h := api.New(&mockQuerier{graph: nil, err: nil}, nil, &noopMetrics{})
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/entity/x/graph", nil)
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("expected 404, got %d", rec.Code)
+	}
+}
+
+func TestEntityOperationsWithMetrics(t *testing.T) {
+	h := api.New(&mockQuerier{}, nil, &noopMetrics{})
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/entity/frb-1/operations", nil)
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d", rec.Code)
+	}
+}
+
+func TestEntityOperationsErrorWithMetrics(t *testing.T) {
+	eq := &errQuerier{opsErr: errors.New("ops down")}
+	h := api.New(eq, nil, &noopMetrics{})
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/entity/frb-1/operations", nil)
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusInternalServerError {
+		t.Errorf("expected 500, got %d", rec.Code)
+	}
+}
+
+func TestListSilencesWithMetrics(t *testing.T) {
+	sq := &silenceQuerier{silences: []db.Silence{}}
+	h := api.New(sq, nil, &noopMetrics{})
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/notifications/silences?instrument_id=CHIME", nil)
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d", rec.Code)
 	}
 }
