@@ -2,6 +2,7 @@ package notifier_test
 
 import (
 	"context"
+	"errors"
 	"os"
 	"strings"
 	"sync"
@@ -428,4 +429,174 @@ func TestRegisterMessaging_NoPanic(t *testing.T) {
 	n.RegisterMessaging("discord", &stubMessaging{})
 	n.RegisterSCM("github", &stubSCM{})
 	n.RegisterSCM("gitlab", &stubSCM{})
+}
+
+// ── doMessaging error / suppressed paths ─────────────────────────────────────
+
+// errMessaging always returns an error from Send.
+type errMessaging struct{}
+
+func (e *errMessaging) Send(_ context.Context, _, _ string, _ notifier.Message, _, _ int) (bool, error) {
+	return false, errors.New("webhook unreachable")
+}
+func (e *errMessaging) FlushDigests(_ context.Context, _ string, _ int) {}
+
+// suppressedMessaging returns (false, nil) — rate-limit suppression.
+type suppressedMessaging struct{}
+
+func (s *suppressedMessaging) Send(_ context.Context, _, _ string, _ notifier.Message, _, _ int) (bool, error) {
+	return false, nil
+}
+func (s *suppressedMessaging) FlushDigests(_ context.Context, _ string, _ int) {}
+
+// errSCM always returns an error from Dispatch.
+type errSCM struct{}
+
+func (e *errSCM) Dispatch(_ context.Context, _ notifier.SCMParams) (string, error) {
+	return "", errors.New("github api error")
+}
+
+func TestDoMessaging_SendError(t *testing.T) {
+	t.Setenv("ERR_MSG_WEBHOOK", "https://hooks.slack.com/test")
+	cfg := yamlLoader(t, `
+instrument_id: ERRMSG
+notifications:
+  slack_webhook_env: ERR_MSG_WEBHOOK
+  events:
+    helix.error:
+      slack:
+        channel: "#alerts"
+        sample_window_seconds: 60
+        max_per_window: 5
+`)
+	sl := silence.New(noopSilenceDB{}, time.Minute)
+	n := notifier.New(cfg, sl, newTestMetrics(), 10, "http://ui", "http://grafana")
+	n.RegisterMessaging("slack", &errMessaging{})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go n.Start(ctx)
+
+	n.Send(notifier.Event{InstrumentID: "ERRMSG", EventName: "helix.error", EntityID: "e1", Message: "test"})
+	time.Sleep(200 * time.Millisecond)
+}
+
+func TestDoMessaging_Suppressed(t *testing.T) {
+	t.Setenv("SUPP_MSG_WEBHOOK", "https://hooks.slack.com/test")
+	cfg := yamlLoader(t, `
+instrument_id: SUPPMSG
+notifications:
+  slack_webhook_env: SUPP_MSG_WEBHOOK
+  events:
+    helix.error:
+      slack:
+        channel: "#alerts"
+        sample_window_seconds: 60
+        max_per_window: 5
+`)
+	sl := silence.New(noopSilenceDB{}, time.Minute)
+	n := notifier.New(cfg, sl, newTestMetrics(), 10, "http://ui", "http://grafana")
+	n.RegisterMessaging("slack", &suppressedMessaging{})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go n.Start(ctx)
+
+	n.Send(notifier.Event{InstrumentID: "SUPPMSG", EventName: "helix.error", EntityID: "e1", Message: "test"})
+	time.Sleep(200 * time.Millisecond)
+}
+
+// ── dispatch "no backend registered" paths ────────────────────────────────────
+
+func TestDispatch_NoMessagingBackendRegistered(t *testing.T) {
+	t.Setenv("NOBE_WEBHOOK", "https://hooks.slack.com/test")
+	cfg := yamlLoader(t, `
+instrument_id: NOBE
+notifications:
+  slack_webhook_env: NOBE_WEBHOOK
+  events:
+    helix.error:
+      slack:
+        channel: "#alerts"
+        sample_window_seconds: 60
+        max_per_window: 5
+`)
+	sl := silence.New(noopSilenceDB{}, time.Minute)
+	n := notifier.New(cfg, sl, newTestMetrics(), 10, "http://ui", "http://grafana")
+	// Register under a different name so "slack" is not found.
+	n.RegisterMessaging("discord", &stubMessaging{})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go n.Start(ctx)
+
+	n.Send(notifier.Event{InstrumentID: "NOBE", EventName: "helix.error", EntityID: "e1", Message: "test"})
+	time.Sleep(100 * time.Millisecond) // dispatch fires the "no backend" warning and returns
+}
+
+func TestDispatch_NoSCMBackendRegistered(t *testing.T) {
+	t.Setenv("NOSCM_WEBHOOK", "https://hooks.slack.com/test")
+	t.Setenv("NOSCM_TOKEN", "ghp_test")
+	cfg := yamlLoader(t, `
+instrument_id: NOSCM
+notifications:
+  slack_webhook_env: NOSCM_WEBHOOK
+  github_token_env: NOSCM_TOKEN
+  events:
+    helix.error:
+      slack:
+        channel: "#alerts"
+        sample_window_seconds: 60
+        max_per_window: 5
+      github:
+        repo: owner/repo
+        labels: [bug]
+`)
+	sl := silence.New(noopSilenceDB{}, time.Minute)
+	stub := &stubMessaging{}
+	n := notifier.New(cfg, sl, newTestMetrics(), 10, "http://ui", "http://grafana")
+	n.RegisterMessaging("slack", stub)
+	// Intentionally do NOT register a "github" SCM backend.
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go n.Start(ctx)
+
+	n.Send(notifier.Event{InstrumentID: "NOSCM", EventName: "helix.error", EntityID: "e1", Message: "test"})
+	waitFor(t, 500*time.Millisecond, func() bool { return stub.count() >= 1 })
+}
+
+// ── doSCM error path ─────────────────────────────────────────────────────────
+
+func TestDoSCM_DispatchError(t *testing.T) {
+	t.Setenv("SCMERR_WEBHOOK", "https://hooks.slack.com/test")
+	t.Setenv("SCMERR_TOKEN", "ghp_test")
+	cfg := yamlLoader(t, `
+instrument_id: SCMERR
+notifications:
+  slack_webhook_env: SCMERR_WEBHOOK
+  github_token_env: SCMERR_TOKEN
+  events:
+    helix.error:
+      slack:
+        channel: "#alerts"
+        sample_window_seconds: 60
+        max_per_window: 5
+      github:
+        repo: owner/repo
+        labels: [bug]
+`)
+	sl := silence.New(noopSilenceDB{}, time.Minute)
+	msgStub := &stubMessaging{}
+	n := notifier.New(cfg, sl, newTestMetrics(), 10, "http://ui", "http://grafana")
+	n.RegisterMessaging("slack", msgStub)
+	n.RegisterSCM("github", &errSCM{})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go n.Start(ctx)
+
+	n.Send(notifier.Event{InstrumentID: "SCMERR", EventName: "helix.error", EntityID: "e1", Message: "dispatch fails"})
+	// Messaging fires after SCM goroutines complete (even on error), so wait for it.
+	waitFor(t, 500*time.Millisecond, func() bool { return msgStub.count() >= 1 })
 }

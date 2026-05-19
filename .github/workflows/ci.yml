@@ -44,7 +44,7 @@ jobs:
       - name: Test
         env:
           TEST_DB_URL: postgres://helix:helix@localhost:5432/helixobs
-        run: go test ./... -race -count=1 -coverprofile=coverage.out -covermode=atomic
+        run: go test ./... -race -count=1 -coverprofile=coverage.out -covermode=atomic -coverpkg=./internal/...
 
       - name: Upload coverage to Coveralls
         uses: coverallsapp/github-action@v2
