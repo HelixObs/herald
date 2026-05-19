@@ -388,9 +388,9 @@ func TestMonitorBinsMissingParams(t *testing.T) {
 func TestMonitorBinsUnknownPlot(t *testing.T) {
 	h := api.New(&mockQuerier{}, nil, nil)
 	rec := httptest.NewRecorder()
-	// 10-minute window: from_ms and to_ms differ by 600000ms (10 min).
+	// 10-minute window: non-zero from_ms so required-params check passes.
 	req := httptest.NewRequest(http.MethodGet,
-		"/api/v1/monitor/bins?plot=nonexistent&instrument=CHIME&from_ms=0&to_ms=600000", nil)
+		"/api/v1/monitor/bins?plot=nonexistent&instrument=CHIME&from_ms=1000000&to_ms=1600000", nil)
 	h.ServeHTTP(rec, req)
 	if rec.Code != http.StatusNotFound {
 		t.Errorf("expected 404 for unknown plot, got %d", rec.Code)
