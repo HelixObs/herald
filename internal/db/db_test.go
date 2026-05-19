@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"testing"
+	"time"
 
 	"github.com/HelixObs/gateway/internal/db"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -312,4 +313,232 @@ func TestWriteEntityOperationNilMetadata(t *testing.T) {
 	if err := store.WriteEntityOperation(context.Background(), op); err != nil {
 		t.Fatalf("WriteEntityOperation with nil metadata: %v", err)
 	}
+}
+
+// ── QueryEntityOperations ─────────────────────────────────────────────────────
+
+func TestQueryEntityOperations(t *testing.T) {
+	store, err := db.New(context.Background(), dbURL(t), nil)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer store.Close()
+
+	entityID := "test-query-ops-entity"
+	// Write entity with a trace_id so QueryEntityOperations can find a creation row.
+	_ = store.WriteEntity(context.Background(), db.Entity{
+		ID:           entityID,
+		InstrumentID: "TEST",
+		TraceID:      "aabbccdd000000000000000000000001",
+		TimestampNs:  1,
+	})
+
+	ops := []db.EntityOperation{
+		{
+			EntityID:     entityID,
+			InstrumentID: "TEST",
+			Operation:    "hdf5-conversion",
+			TraceID:      "aabbccdd000000000000000000000002",
+			TimestampNs:  2_000_000_000,
+			DurationNs:   500_000_000,
+		},
+		{
+			EntityID:     entityID,
+			InstrumentID: "TEST",
+			Operation:    "registration",
+			TraceID:      "aabbccdd000000000000000000000003",
+			TimestampNs:  3_000_000_000,
+			DurationNs:   100_000_000,
+		},
+	}
+	for _, op := range ops {
+		if err := store.WriteEntityOperation(context.Background(), op); err != nil {
+			t.Fatalf("WriteEntityOperation: %v", err)
+		}
+	}
+
+	rows, err := store.QueryEntityOperations(context.Background(), entityID)
+	if err != nil {
+		t.Fatalf("QueryEntityOperations: %v", err)
+	}
+	// Should contain at least the 2 operations written above.
+	if len(rows) < 2 {
+		t.Errorf("expected >= 2 operation rows, got %d", len(rows))
+	}
+}
+
+// ── QueryEntitiesRaw ──────────────────────────────────────────────────────────
+
+func TestQueryEntitiesRaw(t *testing.T) {
+	store, err := db.New(context.Background(), dbURL(t), nil)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer store.Close()
+
+	// Use a narrow timestamp range so we can reliably count results.
+	// created_at is approximately now(), but timestamp_ns is what we filter on.
+	// QueryEntitiesRaw filters on created_at between fromTime and toTime.
+	// We write entities with a timestamp and immediately query — use a wide time window
+	// relative to now() to ensure they appear.
+	const instrument = "TEST_RAW"
+
+	// Write 3 entities we expect to find.
+	inRange := []db.Entity{
+		{ID: "raw-entity-1", InstrumentID: instrument, TimestampNs: 1_000_000_000},
+		{ID: "raw-entity-2", InstrumentID: instrument, TimestampNs: 2_000_000_000},
+		{ID: "raw-entity-3", InstrumentID: instrument, TimestampNs: 3_000_000_000},
+	}
+	for _, e := range inRange {
+		if err := store.WriteEntity(context.Background(), e); err != nil {
+			t.Fatalf("WriteEntity %s: %v", e.ID, err)
+		}
+	}
+
+	// Query using a wide window covering now() so created_at is included.
+	// Use time-based bounds: epoch to 10 years from now.
+	fromNs := int64(0)
+	toNs := time.Now().Add(10 * 365 * 24 * time.Hour).UnixNano()
+	rows, err := store.QueryEntitiesRaw(context.Background(), instrument, fromNs, toNs, "")
+	if err != nil {
+		t.Fatalf("QueryEntitiesRaw: %v", err)
+	}
+	if len(rows) < 3 {
+		t.Errorf("expected >= 3 rows for instrument %s, got %d", instrument, len(rows))
+	}
+}
+
+// ── Silence CRUD ──────────────────────────────────────────────────────────────
+
+func TestSilenceCRUD(t *testing.T) {
+	store, err := db.New(context.Background(), dbURL(t), nil)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer store.Close()
+
+	silence := db.Silence{
+		InstrumentID: "TEST_SILENCE_INST",
+		EventType:    "helix.error",
+		SilencedBy:   "test-user",
+		ExpiresAt:    timeInFuture(),
+		Reason:       "integration test",
+	}
+
+	id, err := store.CreateSilence(context.Background(), silence)
+	if err != nil {
+		t.Fatalf("CreateSilence: %v", err)
+	}
+	if id <= 0 {
+		t.Errorf("expected positive ID, got %d", id)
+	}
+
+	// ListSilences should include the one we just created.
+	list, err := store.ListSilences(context.Background(), "TEST_SILENCE_INST")
+	if err != nil {
+		t.Fatalf("ListSilences: %v", err)
+	}
+	if len(list) == 0 {
+		t.Error("expected >= 1 silence in ListSilences")
+	}
+
+	// ActiveSilences should also include it (expires in the future).
+	active, err := store.ActiveSilences(context.Background(), "TEST_SILENCE_INST")
+	if err != nil {
+		t.Fatalf("ActiveSilences: %v", err)
+	}
+	if len(active) == 0 {
+		t.Error("expected >= 1 active silence")
+	}
+
+	// Delete and verify it's gone from ActiveSilences.
+	if err := store.DeleteSilence(context.Background(), id); err != nil {
+		t.Fatalf("DeleteSilence: %v", err)
+	}
+
+	activeAfterDelete, err := store.ActiveSilences(context.Background(), "TEST_SILENCE_INST")
+	if err != nil {
+		t.Fatalf("ActiveSilences after delete: %v", err)
+	}
+	for _, s := range activeAfterDelete {
+		if s.ID == id {
+			t.Errorf("silence %d should have been deleted, but still appears in ActiveSilences", id)
+		}
+	}
+}
+
+// ── NotificationIssue CRUD ────────────────────────────────────────────────────
+
+func TestNotificationIssueCRUD(t *testing.T) {
+	store, err := db.New(context.Background(), dbURL(t), nil)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer store.Close()
+
+	instrumentID := "TEST_NOTIF_INST"
+	fingerprint := "test-fp-crud-unique-123"
+	repo := "test-org/test-repo"
+
+	// Upsert once.
+	if err := store.UpsertNotificationIssue(context.Background(), instrumentID, fingerprint, repo, 42, "entity-a"); err != nil {
+		t.Fatalf("UpsertNotificationIssue (insert): %v", err)
+	}
+
+	// Find — should return non-nil.
+	rec, err := store.FindNotificationIssue(context.Background(), instrumentID, fingerprint, repo)
+	if err != nil {
+		t.Fatalf("FindNotificationIssue: %v", err)
+	}
+	if rec == nil {
+		t.Fatal("expected non-nil record after upsert")
+	}
+	if rec.GithubIssueNumber != 42 {
+		t.Errorf("expected issue number 42, got %d", rec.GithubIssueNumber)
+	}
+
+	// Upsert again — entity count should increase.
+	if err := store.UpsertNotificationIssue(context.Background(), instrumentID, fingerprint, repo, 42, "entity-b"); err != nil {
+		t.Fatalf("UpsertNotificationIssue (update): %v", err)
+	}
+	rec2, err := store.FindNotificationIssue(context.Background(), instrumentID, fingerprint, repo)
+	if err != nil {
+		t.Fatalf("FindNotificationIssue (after update): %v", err)
+	}
+	if rec2 == nil {
+		t.Fatal("expected non-nil record after second upsert")
+	}
+	if rec2.EntityCount <= rec.EntityCount {
+		t.Errorf("expected entity count to increase: before=%d after=%d", rec.EntityCount, rec2.EntityCount)
+	}
+
+	// Delete and verify.
+	if err := store.DeleteNotificationIssue(context.Background(), instrumentID, fingerprint, repo); err != nil {
+		t.Fatalf("DeleteNotificationIssue: %v", err)
+	}
+	rec3, err := store.FindNotificationIssue(context.Background(), instrumentID, fingerprint, repo)
+	if err != nil {
+		t.Fatalf("FindNotificationIssue (after delete): %v", err)
+	}
+	if rec3 != nil {
+		t.Error("expected nil record after deletion")
+	}
+}
+
+// ── StoreClose ────────────────────────────────────────────────────────────────
+
+func TestStoreClose(t *testing.T) {
+	store, err := db.New(context.Background(), dbURL(t), nil)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	// Close should not panic.
+	store.Close()
+}
+
+// ── helpers ───────────────────────────────────────────────────────────────────
+
+// timeInFuture returns a time 1 hour from now for use as silence ExpiresAt.
+func timeInFuture() time.Time {
+	return time.Now().Add(time.Hour)
 }

@@ -9,6 +9,21 @@ jobs:
   test:
     runs-on: ubuntu-latest
 
+    services:
+      timescaledb:
+        image: timescale/timescaledb:latest-pg16
+        env:
+          POSTGRES_USER: helix
+          POSTGRES_PASSWORD: helix
+          POSTGRES_DB: helixobs
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
     steps:
       - uses: actions/checkout@v4
 
@@ -17,10 +32,18 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      - name: Run migrations
+        run: |
+          for f in migrations/*.sql; do
+            psql postgres://helix:helix@localhost:5432/helixobs -f "$f"
+          done
+
       - name: Vet
         run: go vet ./...
 
       - name: Test
+        env:
+          TEST_DB_URL: postgres://helix:helix@localhost:5432/helixobs
         run: go test ./... -race -count=1 -coverprofile=coverage.out -covermode=atomic
 
       - name: Upload coverage to Coveralls

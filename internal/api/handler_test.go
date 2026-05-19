@@ -1,6 +1,7 @@
 package api_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -8,6 +9,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/HelixObs/gateway/internal/api"
 	"github.com/HelixObs/gateway/internal/db"
@@ -128,5 +130,293 @@ func TestGraphNodeJSONShape(t *testing.T) {
 	}
 	if _, ok := out["edges"]; !ok {
 		t.Error("missing edges key")
+	}
+}
+
+// ── Helpers for new tests ─────────────────────────────────────────────────────
+
+// noopMetrics satisfies apiMetrics without recording anything.
+type noopMetrics struct{}
+
+func (n *noopMetrics) APIRequestRecord(_, _ string, _ time.Duration) {}
+
+// silenceQuerier wraps mockQuerier and also satisfies api.SilenceStore.
+type silenceQuerier struct {
+	mockQuerier
+	silences []db.Silence
+	err      error
+	nextID   int
+}
+
+func (s *silenceQuerier) CreateSilence(_ context.Context, si db.Silence) (int, error) {
+	if s.err != nil {
+		return 0, s.err
+	}
+	s.nextID++
+	si.ID = s.nextID
+	s.silences = append(s.silences, si)
+	return si.ID, nil
+}
+
+func (s *silenceQuerier) DeleteSilence(_ context.Context, _ int) error {
+	return s.err
+}
+
+func (s *silenceQuerier) ListSilences(_ context.Context, _ string) ([]db.Silence, error) {
+	return s.silences, s.err
+}
+
+// errQuerier is a Querier that returns an error for QueryEntityOperations.
+type errQuerier struct {
+	mockQuerier
+	opsErr error
+}
+
+func (e *errQuerier) QueryEntityOperations(_ context.Context, _ string) ([]db.EntityOperationRow, error) {
+	return nil, e.opsErr
+}
+
+func silenceBody(instrumentID string, durationMinutes int, silencedBy string) *bytes.Buffer {
+	body, _ := json.Marshal(map[string]any{
+		"instrument_id":    instrumentID,
+		"duration_minutes": durationMinutes,
+		"silenced_by":      silencedBy,
+	})
+	return bytes.NewBuffer(body)
+}
+
+// ── Silence: create ───────────────────────────────────────────────────────────
+
+func TestCreateSilenceOK(t *testing.T) {
+	sq := &silenceQuerier{}
+	h := api.New(sq, nil, &noopMetrics{})
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/notifications/silence",
+		silenceBody("CHIME", 60, "operator"))
+	req.Header.Set("Content-Type", "application/json")
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Errorf("expected 201, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestCreateSilenceMissingFields(t *testing.T) {
+	sq := &silenceQuerier{}
+	h := api.New(sq, nil, &noopMetrics{})
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/notifications/silence",
+		bytes.NewBufferString(`{}`))
+	req.Header.Set("Content-Type", "application/json")
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d", rec.Code)
+	}
+}
+
+func TestCreateSilenceInvalidJSON(t *testing.T) {
+	sq := &silenceQuerier{}
+	h := api.New(sq, nil, &noopMetrics{})
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/notifications/silence",
+		bytes.NewBufferString(`not-json`))
+	req.Header.Set("Content-Type", "application/json")
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d", rec.Code)
+	}
+}
+
+func TestCreateSilenceDBError(t *testing.T) {
+	sq := &silenceQuerier{err: errors.New("db error")}
+	h := api.New(sq, nil, &noopMetrics{})
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/notifications/silence",
+		silenceBody("CHIME", 60, "operator"))
+	req.Header.Set("Content-Type", "application/json")
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusInternalServerError {
+		t.Errorf("expected 500, got %d", rec.Code)
+	}
+}
+
+// ── Silence: delete ───────────────────────────────────────────────────────────
+
+func TestDeleteSilenceOK(t *testing.T) {
+	sq := &silenceQuerier{}
+	h := api.New(sq, nil, &noopMetrics{})
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/notifications/silence/1", nil)
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNoContent {
+		t.Errorf("expected 204, got %d", rec.Code)
+	}
+}
+
+func TestDeleteSilenceInvalidID(t *testing.T) {
+	sq := &silenceQuerier{}
+	h := api.New(sq, nil, &noopMetrics{})
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/notifications/silence/notanint", nil)
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d", rec.Code)
+	}
+}
+
+func TestDeleteSilenceDBError(t *testing.T) {
+	sq := &silenceQuerier{err: errors.New("delete failed")}
+	h := api.New(sq, nil, &noopMetrics{})
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/notifications/silence/1", nil)
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusInternalServerError {
+		t.Errorf("expected 500, got %d", rec.Code)
+	}
+}
+
+// ── Silence: list ─────────────────────────────────────────────────────────────
+
+func TestListSilencesOK(t *testing.T) {
+	sq := &silenceQuerier{
+		silences: []db.Silence{
+			{ID: 1, InstrumentID: "CHIME", SilencedBy: "ops", ExpiresAt: time.Now().Add(time.Hour)},
+		},
+	}
+	h := api.New(sq, nil, &noopMetrics{})
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/notifications/silences?instrument_id=CHIME", nil)
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var out []db.Silence
+	if err := json.NewDecoder(rec.Body).Decode(&out); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(out) == 0 {
+		t.Error("expected at least one silence in response")
+	}
+}
+
+func TestListSilencesMissingParam(t *testing.T) {
+	sq := &silenceQuerier{}
+	h := api.New(sq, nil, &noopMetrics{})
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/notifications/silences", nil)
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d", rec.Code)
+	}
+}
+
+func TestListSilencesDBError(t *testing.T) {
+	sq := &silenceQuerier{err: errors.New("list failed")}
+	h := api.New(sq, nil, &noopMetrics{})
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/notifications/silences?instrument_id=CHIME", nil)
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusInternalServerError {
+		t.Errorf("expected 500, got %d", rec.Code)
+	}
+}
+
+// ── entityOperations ──────────────────────────────────────────────────────────
+
+func TestEntityOperationsOK(t *testing.T) {
+	h := api.New(&mockQuerier{}, nil, nil)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/entity/frb-1/operations", nil)
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d", rec.Code)
+	}
+}
+
+func TestEntityOperationsNilDB(t *testing.T) {
+	h := api.New(nil, nil, nil)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/entity/frb-1/operations", nil)
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusInternalServerError {
+		t.Errorf("expected 500, got %d", rec.Code)
+	}
+}
+
+func TestEntityOperationsDBError(t *testing.T) {
+	eq := &errQuerier{opsErr: errors.New("ops db error")}
+	h := api.New(eq, nil, nil)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/entity/frb-1/operations", nil)
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusInternalServerError {
+		t.Errorf("expected 500, got %d", rec.Code)
+	}
+}
+
+// ── monitorPlots ──────────────────────────────────────────────────────────────
+
+func TestMonitorPlots(t *testing.T) {
+	h := api.New(&mockQuerier{}, nil, nil)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/monitor/plots", nil)
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var out []map[string]any
+	if err := json.NewDecoder(rec.Body).Decode(&out); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(out) == 0 {
+		t.Error("expected at least one plot config in response")
+	}
+}
+
+// ── monitorBins parameter validation ─────────────────────────────────────────
+
+func TestMonitorBinsMissingParams(t *testing.T) {
+	h := api.New(&mockQuerier{}, nil, nil)
+	rec := httptest.NewRecorder()
+	// Missing all required params.
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/monitor/bins", nil)
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 for missing params, got %d", rec.Code)
+	}
+}
+
+func TestMonitorBinsUnknownPlot(t *testing.T) {
+	h := api.New(&mockQuerier{}, nil, nil)
+	rec := httptest.NewRecorder()
+	// 10-minute window: from_ms and to_ms differ by 600000ms (10 min).
+	req := httptest.NewRequest(http.MethodGet,
+		"/api/v1/monitor/bins?plot=nonexistent&instrument=CHIME&from_ms=0&to_ms=600000", nil)
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("expected 404 for unknown plot, got %d", rec.Code)
+	}
+}
+
+func TestMonitorBinsWindowTooSmall(t *testing.T) {
+	h := api.New(&mockQuerier{}, nil, nil)
+	rec := httptest.NewRecorder()
+	// Window = 1 second = 1000ms — below the 5-minute minimum.
+	req := httptest.NewRequest(http.MethodGet,
+		"/api/v1/monitor/bins?plot=chime_dm_time&instrument=CHIME&from_ms=0&to_ms=1000", nil)
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 for window too small, got %d", rec.Code)
+	}
+}
+
+func TestMonitorBinsWindowTooLarge(t *testing.T) {
+	h := api.New(&mockQuerier{}, nil, nil)
+	rec := httptest.NewRecorder()
+	// 25 hours in milliseconds = 90_000_000ms.
+	req := httptest.NewRequest(http.MethodGet,
+		"/api/v1/monitor/bins?plot=chime_dm_time&instrument=CHIME&from_ms=0&to_ms=90000000", nil)
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 for window too large, got %d", rec.Code)
 	}
 }

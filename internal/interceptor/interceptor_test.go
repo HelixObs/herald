@@ -468,3 +468,75 @@ func TestMultipleOperationsOnSameEntity(t *testing.T) {
 
 // verify the strings package is used (import check)
 var _ = strings.Contains
+
+// ── WithNotifier ──────────────────────────────────────────────────────────────
+
+func TestWithNotifierNilNoPanic(t *testing.T) {
+	icp := newInterceptor()
+	// Setting a nil notifier must not panic.
+	icp.WithNotifier(nil)
+}
+
+func TestWithNotifierNilGuardedOnHelixEvent(t *testing.T) {
+	icp := newInterceptor()
+	icp.WithNotifier(nil) // nil notifier — guarded by `if icp.notifier != nil`
+
+	span := makeSpan("classifier", map[string]string{
+		"helix.entity.id":     "cand-notifier",
+		"helix.instrument.id": "CHIME",
+	})
+	span.Events = []*tracepb.Span_Event{
+		{Name: "helix.error", TimeUnixNano: 1_000_000_000,
+			Attributes: []*commonpb.KeyValue{strAttr("msg", "disk full")}},
+	}
+	// Must not panic even though the notifier is nil.
+	icp.Process(makeReq(span))
+}
+
+// ── Attribute type coverage (int, double, bool) ───────────────────────────────
+
+func TestHelixEventIntAttribute(t *testing.T) {
+	icp := newInterceptor()
+	span := makeSpan("classifier", map[string]string{
+		"helix.entity.id":     "cand-int-attr",
+		"helix.instrument.id": "CHIME",
+	})
+	span.Events = []*tracepb.Span_Event{{
+		Name: "helix.error",
+		Attributes: []*commonpb.KeyValue{
+			{Key: "count", Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_IntValue{IntValue: 42}}},
+		},
+	}}
+	// Must not panic and the event metadata must convert the IntValue without error.
+	icp.Process(makeReq(span))
+}
+
+func TestHelixEventDoubleAttribute(t *testing.T) {
+	icp := newInterceptor()
+	span := makeSpan("classifier", map[string]string{
+		"helix.entity.id":     "cand-double-attr",
+		"helix.instrument.id": "CHIME",
+	})
+	span.Events = []*tracepb.Span_Event{{
+		Name: "helix.error",
+		Attributes: []*commonpb.KeyValue{
+			{Key: "ratio", Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_DoubleValue{DoubleValue: 0.92}}},
+		},
+	}}
+	icp.Process(makeReq(span))
+}
+
+func TestHelixEventBoolAttribute(t *testing.T) {
+	icp := newInterceptor()
+	span := makeSpan("classifier", map[string]string{
+		"helix.entity.id":     "cand-bool-attr",
+		"helix.instrument.id": "CHIME",
+	})
+	span.Events = []*tracepb.Span_Event{{
+		Name: "helix.error",
+		Attributes: []*commonpb.KeyValue{
+			{Key: "fatal", Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_BoolValue{BoolValue: true}}},
+		},
+	}}
+	icp.Process(makeReq(span))
+}

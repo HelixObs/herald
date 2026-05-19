@@ -3,6 +3,7 @@ package metrics_test
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
@@ -137,5 +138,98 @@ func TestIndependentRegistriesDoNotShareState(t *testing.T) {
 	if testutil.ToFloat64(m1.EntitiesTotal.WithLabelValues("CHIME", "stage", "ok")) ==
 		testutil.ToFloat64(m2.EntitiesTotal.WithLabelValues("CHIME", "stage", "ok")) {
 		t.Error("registries should be independent")
+	}
+}
+
+// ── Interface adapter tests ───────────────────────────────────────────────────
+
+func TestTraceStoreAdapters(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	m := metrics.New(reg)
+
+	m.TraceStoreHit()
+	m.TraceStoreHit()
+	m.TraceStoreMiss()
+	m.TraceStoreEviction()
+	m.TraceStoreSetSize(10)
+	m.RecordTraceStoreLookup(time.Millisecond)
+
+	if v := testutil.ToFloat64(m.TraceStoreHitsTotal); v != 2 {
+		t.Errorf("expected TraceStoreHitsTotal=2, got %v", v)
+	}
+	if v := testutil.ToFloat64(m.TraceStoreMissesTotal); v != 1 {
+		t.Errorf("expected TraceStoreMissesTotal=1, got %v", v)
+	}
+	if v := testutil.ToFloat64(m.TraceStoreEvictionsTotal); v != 1 {
+		t.Errorf("expected TraceStoreEvictionsTotal=1, got %v", v)
+	}
+	if v := testutil.ToFloat64(m.TraceStoreSize); v != 10 {
+		t.Errorf("expected TraceStoreSize=10, got %v", v)
+	}
+}
+
+func TestDBAdapters(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	m := metrics.New(reg)
+
+	m.DBWriteRecord("entities", "success", time.Millisecond)
+	m.DBWriteRecord("entities", "failed", time.Millisecond)
+	m.DBPoolStats(5, 40)
+	m.DBQueryRecord("entity_graph", "success", time.Millisecond)
+
+	if v := testutil.ToFloat64(m.DBWritesTotal.WithLabelValues("entities", "success")); v != 1 {
+		t.Errorf("expected DBWritesTotal entities:success=1, got %v", v)
+	}
+	if v := testutil.ToFloat64(m.DBWritesTotal.WithLabelValues("entities", "failed")); v != 1 {
+		t.Errorf("expected DBWritesTotal entities:failed=1, got %v", v)
+	}
+	// DBWriteRecord with "failed" also increments DBWriteErrorsTotal.
+	if v := testutil.ToFloat64(m.DBWriteErrorsTotal); v != 1 {
+		t.Errorf("expected DBWriteErrorsTotal=1 after failed write, got %v", v)
+	}
+	if v := testutil.ToFloat64(m.DBConnectionsInUse); v != 5 {
+		t.Errorf("expected DBConnectionsInUse=5, got %v", v)
+	}
+	if v := testutil.ToFloat64(m.DBConnectionsTotal); v != 40 {
+		t.Errorf("expected DBConnectionsTotal=40, got %v", v)
+	}
+	if v := testutil.ToFloat64(m.DBQueriesTotal.WithLabelValues("entity_graph", "success")); v != 1 {
+		t.Errorf("expected DBQueriesTotal entity_graph:success=1, got %v", v)
+	}
+}
+
+func TestAPIRequestRecord(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	m := metrics.New(reg)
+
+	m.APIRequestRecord("entity_graph", "200", time.Millisecond)
+	m.APIRequestRecord("entity_graph", "200", 2*time.Millisecond)
+	m.APIRequestRecord("entity_graph", "404", time.Millisecond)
+
+	if v := testutil.ToFloat64(m.APIRequestsTotal.WithLabelValues("entity_graph", "200")); v != 2 {
+		t.Errorf("expected APIRequestsTotal entity_graph:200=2, got %v", v)
+	}
+	if v := testutil.ToFloat64(m.APIRequestsTotal.WithLabelValues("entity_graph", "404")); v != 1 {
+		t.Errorf("expected APIRequestsTotal entity_graph:404=1, got %v", v)
+	}
+}
+
+func TestDBAdaptersPoolStats(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	m := metrics.New(reg)
+
+	m.DBPoolStats(3, 20)
+
+	expected := `
+		# HELP helix_db_connections_in_use DB connection pool connections currently acquired.
+		# TYPE helix_db_connections_in_use gauge
+		helix_db_connections_in_use 3
+		# HELP helix_db_connections_total DB connection pool total size.
+		# TYPE helix_db_connections_total gauge
+		helix_db_connections_total 20
+	`
+	if err := testutil.GatherAndCompare(reg, strings.NewReader(expected),
+		"helix_db_connections_in_use", "helix_db_connections_total"); err != nil {
+		t.Error(err)
 	}
 }

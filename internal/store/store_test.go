@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/HelixObs/gateway/internal/store"
 )
@@ -111,4 +112,68 @@ func TestConcurrentPutsAndGets(t *testing.T) {
 		}()
 	}
 	wg.Wait()
+}
+
+// ── Metrics path ──────────────────────────────────────────────────────────────
+
+type mockStoreMetrics struct {
+	hits, misses, evictions, size int
+	lookups                       int
+}
+
+func (m *mockStoreMetrics) TraceStoreHit()                         { m.hits++ }
+func (m *mockStoreMetrics) TraceStoreMiss()                        { m.misses++ }
+func (m *mockStoreMetrics) TraceStoreEviction()                    { m.evictions++ }
+func (m *mockStoreMetrics) TraceStoreSetSize(n int)                { m.size = n }
+func (m *mockStoreMetrics) RecordTraceStoreLookup(_ time.Duration) { m.lookups++ }
+
+func TestMetricsPutGetHit(t *testing.T) {
+	m := &mockStoreMetrics{}
+	s := store.New(10, m)
+	s.Put("entity-m1", ref(1, 1))
+	got := s.Get("entity-m1")
+	if got == nil {
+		t.Fatal("expected non-nil SpanRef")
+	}
+	if m.hits != 1 {
+		t.Errorf("expected hits=1, got %d", m.hits)
+	}
+	if m.lookups != 1 {
+		t.Errorf("expected lookups=1, got %d", m.lookups)
+	}
+	if m.size != 1 {
+		t.Errorf("expected size=1, got %d", m.size)
+	}
+}
+
+func TestMetricsGetMiss(t *testing.T) {
+	m := &mockStoreMetrics{}
+	s := store.New(10, m)
+	got := s.Get("nonexistent-metrics")
+	if got != nil {
+		t.Fatal("expected nil for missing key")
+	}
+	if m.misses != 1 {
+		t.Errorf("expected misses=1, got %d", m.misses)
+	}
+	if m.lookups != 1 {
+		t.Errorf("expected lookups=1, got %d", m.lookups)
+	}
+}
+
+func TestMetricsEviction(t *testing.T) {
+	m := &mockStoreMetrics{}
+	s := store.New(3, m)
+	// Fill to maxSize.
+	for i := 0; i < 3; i++ {
+		s.Put(fmt.Sprintf("entity-ev-%d", i), ref(byte(i), byte(i)))
+	}
+	if m.evictions != 0 {
+		t.Errorf("expected 0 evictions before overflow, got %d", m.evictions)
+	}
+	// Add one more — triggers eviction.
+	s.Put("entity-ev-overflow", ref(99, 99))
+	if m.evictions != 1 {
+		t.Errorf("expected 1 eviction, got %d", m.evictions)
+	}
 }
