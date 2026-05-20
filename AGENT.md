@@ -223,6 +223,58 @@ Silence rules are persisted in `notification_silences` and cached in-process wit
 | `helix_notification_send_duration_seconds` | `type` | Send latency per backend type |
 | `helix_notification_channel_drops_total` | — | Events dropped (channel full or semaphore full) |
 
+## Authentication
+
+The gateway issues short-lived HelixObs JWTs (24h, HS256) via `POST /auth/token`.
+Instruments authenticate using a pluggable per-instrument backend configured in the
+instrument YAML `auth:` block.
+
+### Auth backends
+
+| Backend | YAML `type` | How it works |
+|---|---|---|
+| `secret` | `type: secret` + `api_key_hash: sha256:<hex>` | Client sends registration secret; gateway compares SHA-256 hash |
+| `token_introspection` | `type: token_introspection` + `verify_url: https://...` | Client sends existing JWT; gateway calls remote `/verify` → HTTP 200 = valid |
+
+### Token exchange flow
+
+```
+POST /auth/token
+{"instrument_id": "CHIMEFRB", "credential": "<existing-chime-jwt>"}
+→ {"token": "<helixobs-jwt>", "expires_in": 86400}
+```
+
+Client then sends `Authorization: Bearer <helixobs-jwt>` on all subsequent API and gRPC calls.
+
+### Key rotation (zero-downtime)
+
+`JWT_SECRET` accepts a comma-separated list: `"new-key,old-key"`. The first key signs new
+tokens; all keys are tried for verification. Rotate by prepending the new key, waiting for
+old tokens to expire (24h), then removing the old key.
+
+### Rollout
+
+Empty `JWT_SECRET` = auth disabled (dev mode, backward compatible). Safe rollout:
+1. Deploy gateway with empty `JWT_SECRET` (no enforcement).
+2. Distribute secrets to pipeline operators.
+3. Pipelines update to call `/auth/token` at startup.
+4. Set `JWT_SECRET` → enforcement begins.
+
+### Adding a new instrument (secret backend)
+
+```bash
+# 1. Generate a secret (share this with the instrument team out-of-band):
+openssl rand -hex 32
+
+# 2. Compute the hash (store this in instrument YAML — safe to commit):
+echo -n "<secret>" | sha256sum
+
+# 3. Add to instruments/my-telescope.yml:
+# auth:
+#   type: secret
+#   api_key_hash: "sha256:<hash-from-step-2>"
+```
+
 ## Environment variables
 
 | Variable | Default | Description |
@@ -233,6 +285,7 @@ Silence rules are persisted in `notification_silences` and cached in-process wit
 | `METRICS_ADDR` | `:2112` | Prometheus `/metrics` HTTP endpoint |
 | `API_ADDR` | `:8080` | HTTP query API endpoint |
 | `INSTRUMENTS_DIR` | `/instruments` | Directory of instrument YAML config files |
+| `JWT_SECRET` | `` | Comma-separated signing secrets; empty = auth disabled |
 | `UI_BASE_URL` | `http://localhost:8081` | Base URL for entity inspector links in notifications |
 | `GRAFANA_URL` | `http://localhost:3001` | Grafana URL for error-entities dashboard links |
 

@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -19,6 +20,7 @@ import (
 	"google.golang.org/grpc/reflection"
 
 	"github.com/HelixObs/gateway/internal/api"
+	"github.com/HelixObs/gateway/internal/auth"
 	"github.com/HelixObs/gateway/internal/db"
 	"github.com/HelixObs/gateway/internal/interceptor"
 	"github.com/HelixObs/gateway/internal/metrics"
@@ -77,6 +79,20 @@ func run() error {
 	n.RegisterSCM("github", ghbackend.New(dbStore))
 	go n.Start(ctx)
 
+	// ── Auth ──────────────────────────────────────────────────────────
+	// JWT_SECRET: comma-separated list of signing secrets.
+	// First key signs new tokens; all keys validate (zero-downtime rotation).
+	// Empty = auth disabled (dev mode / safe rollout).
+	jwtSecrets := strings.Split(cfg.jwtSecret, ",")
+	issuer := auth.NewIssuer(jwtSecrets)
+	if issuer.Enabled() {
+		slog.Info("auth enabled", "keys", len(jwtSecrets))
+	} else {
+		slog.Warn("auth disabled — set JWT_SECRET to enable enforcement")
+	}
+	authConfigs := auth.NewConfigStore(cfg.instrumentsDir)
+	authConfigs.Start(ctx, 30*time.Second)
+
 	// ── Interceptor ───────────────────────────────────────────────────
 	traceStore := store.New(cfg.traceStoreSize, m)
 	icp := interceptor.New(traceStore, dbStore, m)
@@ -89,7 +105,8 @@ func run() error {
 	}
 
 	// ── gRPC server ───────────────────────────────────────────────────
-	grpcSrv := grpc.NewServer()
+	// UnaryInterceptor validates Bearer tokens on gRPC calls when auth is enabled.
+	grpcSrv := grpc.NewServer(grpc.UnaryInterceptor(auth.UnaryInterceptor(issuer)))
 	collectortracepb.RegisterTraceServiceServer(grpcSrv, recv)
 	reflection.Register(grpcSrv) // lets grpcurl explore the service
 
@@ -111,7 +128,11 @@ func run() error {
 	}()
 
 	// ── API HTTP ──────────────────────────────────────────────────────
-	apiSrv := &http.Server{Addr: cfg.apiAddr, Handler: api.New(dbStore, dbStore, m)}
+	// /auth/token is public (issues tokens); all /api/v1/* require Bearer auth.
+	apiMux := http.NewServeMux()
+	apiMux.Handle("/auth/token", auth.NewTokenHandler(authConfigs, issuer))
+	apiMux.Handle("/", auth.BearerAuth(issuer, api.New(dbStore, dbStore, m)))
+	apiSrv := &http.Server{Addr: cfg.apiAddr, Handler: apiMux}
 	go func() {
 		slog.Info("api listening", "addr", cfg.apiAddr)
 		if err := apiSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
@@ -145,6 +166,9 @@ type config struct {
 	apiAddr           string
 	traceStoreSize    int
 
+	// Auth
+	jwtSecret string // comma-separated signing secrets; empty = auth disabled
+
 	// Notifier
 	instrumentsDir              string
 	notifierReloadIntervalSecs  int
@@ -163,6 +187,8 @@ func configFromEnv() config {
 		metricsAddr:       envOr("METRICS_ADDR", ":2112"),
 		apiAddr:           envOr("API_ADDR", ":8080"),
 		traceStoreSize:    10_000,
+
+		jwtSecret: os.Getenv("JWT_SECRET"), // empty = dev mode (no enforcement)
 
 		instrumentsDir:              envOr("INSTRUMENTS_DIR", "/instruments"),
 		notifierReloadIntervalSecs:  30,
