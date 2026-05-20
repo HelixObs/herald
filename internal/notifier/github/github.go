@@ -87,7 +87,9 @@ func (c *Client) createIssue(ctx context.Context, client *gh.Client, owner, repo
 	}
 	slog.Info("github: created issue", "repo", p.Repo, "number", issue.GetNumber(), "fingerprint", p.Fingerprint)
 	issueURL := fmt.Sprintf("https://github.com/%s/%s/issues/%d", owner, repo, issue.GetNumber())
-	return issueURL, c.db.UpsertNotificationIssue(ctx, p.InstrumentID, p.Fingerprint, p.Repo, issue.GetNumber(), p.EntityID)
+	// Use context.Background() so a gateway shutdown can't cancel this write after the
+	// GitHub issue already exists — an orphaned issue with no DB record causes duplicates.
+	return issueURL, c.db.UpsertNotificationIssue(context.Background(), p.InstrumentID, p.Fingerprint, p.Repo, issue.GetNumber(), p.EntityID)
 }
 
 func (c *Client) updateIssue(ctx context.Context, client *gh.Client, owner, repo string,

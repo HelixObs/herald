@@ -50,6 +50,7 @@ type Notifier struct {
 	grafana        string
 	sem            map[string]chan struct{} // per "type" and "type_scm"
 	digestInterval time.Duration
+	fpLocks        sync.Map // fingerprint → *sync.Mutex; serialises concurrent createIssue for same fp
 }
 
 // New creates a Notifier. Backends must be registered via RegisterMessaging / RegisterSCM
@@ -223,9 +224,22 @@ func (n *Notifier) doMessaging(ctx context.Context, e Event, mc config.Messaging
 	}
 }
 
+func (n *Notifier) fpLock(fp string) *sync.Mutex {
+	v, _ := n.fpLocks.LoadOrStore(fp, &sync.Mutex{})
+	return v.(*sync.Mutex)
+}
+
 // doSCM dispatches to one SCM backend and returns the resulting issue URL (empty on error).
 func (n *Notifier) doSCM(ctx context.Context, e Event, sc config.SCMCall,
 	backend SCMBackend, fp, inspectorURL string) string {
+
+	// Serialise concurrent dispatches for the same fingerprint. Without this, a burst
+	// of N events with identical messages (e.g. queued spans flushed after reconnect)
+	// each see nil from FindNotificationIssue and all call createIssue, producing N
+	// duplicate GitHub issues.
+	mu := n.fpLock(fp)
+	mu.Lock()
+	defer mu.Unlock()
 
 	title := fmt.Sprintf("[%s] %s", e.InstrumentID, truncate(e.Message, 80))
 	if e.Stage != "" {
