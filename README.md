@@ -10,6 +10,7 @@ and forwards the enriched batch to the downstream OTel Collector.
 
 ## Documentation
 
+- **[helixobs.github.io](https://helixobs.github.io)** — full documentation site: operator guides, client API reference, dashboards
 - **[AGENT.md](AGENT.md)** — full architecture, span attribute contract, HTTP API, Prometheus metrics, environment variables, DB schema, notification system
 - **[Instrument Integration Guide](https://github.com/HelixObs/helixobs/blob/main/INSTRUMENT_SETUP.md)** — how to add a new instrument: YAML config, Slack/GitHub notifications, Sherlock AI context
 
