@@ -1,6 +1,6 @@
 # helixobs — gateway
 
-[![Coverage Status](https://coveralls.io/repos/github/HelixObs/gateway/badge.svg?branch=main)](https://coveralls.io/github/HelixObs/gateway?branch=main)
+[![Coverage Status](https://img.shields.io/coveralls/github/HelixObs/gateway/main)](https://coveralls.io/github/HelixObs/gateway?branch=main)
 
 OTLP interceptor that adds entity-centric intelligence to standard OpenTelemetry spans.
 
