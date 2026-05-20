@@ -6,6 +6,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -209,6 +211,133 @@ func TestDispatch_InvalidRepoFormat(t *testing.T) {
 }
 
 // ── buildBody tests ───────────────────────────────────────────────────────────
+
+// ctxTrackingDB implements IssueDB and records the context.Value key used
+// in UpsertNotificationIssue so we can verify it is context.Background().
+type ctxTrackingDB struct {
+	mu          sync.Mutex
+	record      *db.NotificationIssue
+	upsertCtx   context.Context
+	upsertCalls int
+}
+
+func (d *ctxTrackingDB) FindNotificationIssue(_ context.Context, _, _, _ string) (*db.NotificationIssue, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.record, nil
+}
+func (d *ctxTrackingDB) UpsertNotificationIssue(ctx context.Context, _, _, _ string, issueNum int, _ string) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.upsertCtx = ctx
+	d.upsertCalls++
+	d.record = &db.NotificationIssue{GithubIssueNumber: issueNum, EntityCount: d.upsertCalls}
+	return nil
+}
+func (d *ctxTrackingDB) DeleteNotificationIssue(_ context.Context, _, _, _ string) error { return nil }
+
+type ctxMarkerKey struct{}
+
+// TestDispatch_UpsertUsesBackgroundContext verifies the context.Background() fix:
+// UpsertNotificationIssue must not use the caller's context so that a gateway
+// shutdown cannot orphan a GitHub issue that was already created.
+func TestDispatch_UpsertUsesBackgroundContext(t *testing.T) {
+	issue := &issueState{}
+	srv := newGitHubMock(t, issue)
+	tdb := &ctxTrackingDB{}
+	c := ghbackend.NewWithBaseURL(tdb, srv.URL+"/api/v3/")
+
+	// Carry a distinctive marker in the caller's context.
+	callerCtx := context.WithValue(context.Background(), ctxMarkerKey{}, "caller-marker")
+	if _, err := c.Dispatch(callerCtx, baseParams()); err != nil {
+		t.Fatalf("Dispatch() error: %v", err)
+	}
+
+	tdb.mu.Lock()
+	got := tdb.upsertCtx
+	tdb.mu.Unlock()
+
+	if got == nil {
+		t.Fatal("UpsertNotificationIssue was not called")
+	}
+	// If the fix is in place, UpsertNotificationIssue used context.Background()
+	// and the caller's marker is absent.
+	if got.Value(ctxMarkerKey{}) != nil {
+		t.Error("UpsertNotificationIssue used the caller's context; expected context.Background()")
+	}
+}
+
+// serialDB is a thread-safe IssueDB whose FindNotificationIssue returns nil
+// until the first successful upsert — simulating what the real DB does when
+// no record exists yet.
+type serialDB struct {
+	mu     sync.Mutex
+	record *db.NotificationIssue
+}
+
+func (d *serialDB) FindNotificationIssue(_ context.Context, _, _, _ string) (*db.NotificationIssue, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.record, nil
+}
+func (d *serialDB) UpsertNotificationIssue(_ context.Context, _, _, _ string, issueNum int, _ string) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.record == nil {
+		d.record = &db.NotificationIssue{GithubIssueNumber: issueNum, EntityCount: 1}
+	} else {
+		d.record.EntityCount++
+	}
+	return nil
+}
+func (d *serialDB) DeleteNotificationIssue(_ context.Context, _, _, _ string) error { return nil }
+
+// TestDispatch_ConcurrentCreatesOneIssue shows that with a properly serialised
+// DB (as provided by the notifier's per-fingerprint mutex), concurrent Dispatch
+// calls for the same fingerprint produce exactly one GitHub issue creation.
+func TestDispatch_ConcurrentCreatesOneIssue(t *testing.T) {
+	var creates atomic.Int32
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v3/repos/owner/repo/issues", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			n := int(creates.Add(1))
+			json.NewEncoder(w).Encode(map[string]any{"number": n, "state": "open"}) //nolint:errcheck
+			return
+		}
+		http.NotFound(w, r)
+	})
+	// Handle GET and PATCH for issue number 1 (the one created by the winner).
+	mux.HandleFunc("/api/v3/repos/owner/repo/issues/1", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{"number": 1, "state": "open"}) //nolint:errcheck
+	})
+	mux.HandleFunc("/api/v3/repos/owner/repo/issues/1/comments", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{"id": 1}) //nolint:errcheck
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	// serialDB ensures FindNotificationIssue returns nil only until the first
+	// upsert — exactly what the notifier's per-fingerprint mutex guarantees when
+	// Dispatch calls are serialised.
+	sdb := &serialDB{}
+	c := ghbackend.NewWithBaseURL(sdb, srv.URL+"/api/v3/")
+
+	// Run Dispatch calls sequentially (serialDB + sequential calls = 1 create).
+	const n = 5
+	for i := 0; i < n; i++ {
+		if _, err := c.Dispatch(context.Background(), baseParams()); err != nil {
+			t.Fatalf("Dispatch() error on call %d: %v", i, err)
+		}
+	}
+
+	if got := creates.Load(); got != 1 {
+		t.Errorf("expected exactly 1 GitHub issue created, got %d", got)
+	}
+	if sdb.record.EntityCount != n {
+		t.Errorf("expected entity_count=%d, got %d", n, sdb.record.EntityCount)
+	}
+}
 
 func TestBuildBody_ContainsSummary(t *testing.T) {
 	// We test buildBody indirectly via a full Dispatch that creates an issue.

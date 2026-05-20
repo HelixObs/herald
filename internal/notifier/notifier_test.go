@@ -627,6 +627,89 @@ notifications:
 	time.Sleep(200 * time.Millisecond)
 }
 
+// TestDoSCM_FingerprintMutexSerialisesDispatches verifies that the per-fingerprint
+// mutex in doSCM prevents concurrent goroutines from calling Dispatch simultaneously
+// for the same fingerprint, which is what caused duplicate GitHub issues.
+func TestDoSCM_FingerprintMutexSerialisesDispatches(t *testing.T) {
+	t.Setenv("FP_MUTEX_TOKEN", "ghp_test")
+	t.Setenv("FP_MUTEX_WEBHOOK", "https://hooks.slack.com/test")
+	cfg := yamlLoader(t, `
+instrument_id: FPMUTEX
+notifications:
+  slack_webhook_env: FP_MUTEX_WEBHOOK
+  github_token_env:  FP_MUTEX_TOKEN
+  events:
+    helix.error:
+      github:
+        repo: owner/repo
+        labels: [bug]
+        on_recurrence_after_close: reopen
+`)
+	sl := silence.New(noopSilenceDB{}, time.Minute)
+
+	// slowSCM records when each Dispatch starts and ends; concurrent overlapping
+	// calls would indicate the mutex is absent.
+	type interval struct{ start, end time.Time }
+	var (
+		mu        sync.Mutex
+		intervals []interval
+	)
+	slow := &slowSCMStub{
+		delay: 30 * time.Millisecond,
+		onDispatch: func() {
+			start := time.Now()
+			time.Sleep(30 * time.Millisecond)
+			mu.Lock()
+			intervals = append(intervals, interval{start, time.Now()})
+			mu.Unlock()
+		},
+	}
+
+	n := notifier.New(cfg, sl, newTestMetrics(), 20, "http://ui", "http://grafana")
+	n.RegisterSCM("github", slow)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go n.Start(ctx)
+
+	const sends = 4
+	for i := 0; i < sends; i++ {
+		n.Send(notifier.Event{
+			InstrumentID: "FPMUTEX",
+			EventName:    "helix.error",
+			EntityID:     "entity-" + string(rune('0'+i)),
+			Message:      "same error message", // same fingerprint for all
+		})
+	}
+
+	waitFor(t, 2*time.Second, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(intervals) == sends
+	})
+
+	// Verify no two intervals overlap — calls were serialised.
+	mu.Lock()
+	defer mu.Unlock()
+	for i := 1; i < len(intervals); i++ {
+		if intervals[i].start.Before(intervals[i-1].end) {
+			t.Errorf("dispatch %d overlapped with dispatch %d — fingerprint mutex not working", i, i-1)
+		}
+	}
+}
+
+type slowSCMStub struct {
+	delay      time.Duration
+	onDispatch func()
+}
+
+func (s *slowSCMStub) Dispatch(_ context.Context, _ notifier.SCMParams) (string, error) {
+	if s.onDispatch != nil {
+		s.onDispatch()
+	}
+	return "https://github.com/owner/repo/issues/1", nil
+}
+
 func TestDoSCM_DispatchError(t *testing.T) {
 	t.Setenv("SCMERR_WEBHOOK", "https://hooks.slack.com/test")
 	t.Setenv("SCMERR_TOKEN", "ghp_test")
