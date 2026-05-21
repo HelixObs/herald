@@ -315,11 +315,18 @@ func (h *Handler) monitorBins(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	rows, err := h.monitor.QueryEntitiesRaw(r.Context(), instrument, fromNs, toNs, metaFilter)
+	ctx, cancel := context.WithTimeout(r.Context(), 8*time.Second)
+	defer cancel()
+	rows, err := h.monitor.QueryEntitiesRaw(ctx, instrument, fromNs, toNs, metaFilter)
 	if err != nil {
 		status = "error"
-		slog.Error("monitor bins query failed", "plot", plotName, "error", err)
-		http.Error(w, "internal error", http.StatusInternalServerError)
+		if ctx.Err() != nil {
+			slog.Warn("monitor bins timed out (pool likely saturated)", "plot", plotName)
+			http.Error(w, "service temporarily unavailable", http.StatusServiceUnavailable)
+		} else {
+			slog.Error("monitor bins query failed", "plot", plotName, "error", err)
+			http.Error(w, "internal error", http.StatusInternalServerError)
+		}
 		return
 	}
 
