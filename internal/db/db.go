@@ -470,14 +470,15 @@ type NotificationIssue struct {
 
 // Silence is one row from notification_silences.
 type Silence struct {
-	ID           int       `json:"id"`
-	InstrumentID string    `json:"instrument_id"`
-	EventType    string    `json:"event_type,omitempty"`
-	Fingerprint  string    `json:"fingerprint,omitempty"`
-	SilencedBy   string    `json:"silenced_by"`
-	SilencedAt   time.Time `json:"silenced_at"`
-	ExpiresAt    time.Time `json:"expires_at"`
-	Reason       string    `json:"reason,omitempty"`
+	ID             int       `json:"id"`
+	InstrumentID   string    `json:"instrument_id"`
+	EventType      string    `json:"event_type,omitempty"`
+	Fingerprint    string    `json:"fingerprint,omitempty"`
+	SilencedBy     string    `json:"silenced_by"`
+	SilencedAt     time.Time `json:"silenced_at"`
+	ExpiresAt      time.Time `json:"expires_at"`
+	Reason         string    `json:"reason,omitempty"`
+	GithubIssueURL string    `json:"github_issue_url,omitempty"`
 }
 
 // FindNotificationIssue returns the persisted record for a fingerprint, or nil if none exists.
@@ -572,14 +573,20 @@ func (s *Store) DeleteSilence(ctx context.Context, id int) error {
 	return err
 }
 
-// ListSilences returns all silences for an instrument (including expired ones).
+// ListSilences returns all silences for an instrument (including expired ones),
+// with a GitHub issue URL where one exists for the silence's fingerprint.
 func (s *Store) ListSilences(ctx context.Context, instrumentID string) ([]Silence, error) {
 	rows, err := s.pool.Query(ctx, `
-		SELECT id, instrument_id, COALESCE(event_type,''), COALESCE(fingerprint,''),
-		       silenced_by, silenced_at, expires_at, COALESCE(reason,'')
-		FROM notification_silences
-		WHERE instrument_id = $1
-		ORDER BY expires_at DESC`,
+		SELECT ns.id, ns.instrument_id,
+		       COALESCE(ns.event_type,''), COALESCE(ns.fingerprint,''),
+		       ns.silenced_by, ns.silenced_at, ns.expires_at, COALESCE(ns.reason,''),
+		       COALESCE(ni.github_repo, ''), COALESCE(ni.github_issue_number, 0)
+		FROM notification_silences ns
+		LEFT JOIN notification_issues ni
+		       ON ni.instrument_id = ns.instrument_id
+		      AND ni.error_fingerprint = ns.fingerprint
+		WHERE ns.instrument_id = $1
+		ORDER BY ns.expires_at DESC`,
 		instrumentID,
 	)
 	if err != nil {
@@ -588,12 +595,20 @@ func (s *Store) ListSilences(ctx context.Context, instrumentID string) ([]Silenc
 	defer rows.Close()
 	var silences []Silence
 	for rows.Next() {
-		var s Silence
-		if err := rows.Scan(&s.ID, &s.InstrumentID, &s.EventType, &s.Fingerprint,
-			&s.SilencedBy, &s.SilencedAt, &s.ExpiresAt, &s.Reason); err != nil {
+		var (
+			sl        Silence
+			ghRepo    string
+			ghIssueNo int
+		)
+		if err := rows.Scan(&sl.ID, &sl.InstrumentID, &sl.EventType, &sl.Fingerprint,
+			&sl.SilencedBy, &sl.SilencedAt, &sl.ExpiresAt, &sl.Reason,
+			&ghRepo, &ghIssueNo); err != nil {
 			return nil, err
 		}
-		silences = append(silences, s)
+		if ghRepo != "" && ghIssueNo > 0 {
+			sl.GithubIssueURL = fmt.Sprintf("https://github.com/%s/issues/%d", ghRepo, ghIssueNo)
+		}
+		silences = append(silences, sl)
 	}
 	return silences, rows.Err()
 }
