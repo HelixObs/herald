@@ -639,6 +639,7 @@ func (s *Store) QueryInstruments(ctx context.Context) ([]string, error) {
 type AlertRow struct {
 	GroupKey        string            `json:"group_key"`
 	Fingerprint     string            `json:"fingerprint"`
+	GithubIssueURL  string            `json:"github_issue_url,omitempty"`
 	Metadata        map[string]string `json:"metadata"`
 	OccurrenceCount int               `json:"occurrence_count"`
 	FirstSeen       time.Time         `json:"first_seen"`
@@ -681,6 +682,12 @@ func (s *Store) QueryAlerts(ctx context.Context, instrumentID string) ([]AlertRo
 	}
 	defer rows.Close()
 
+	// Build fingerprint → issue URL map for this instrument.
+	issueURLs, err := s.issueURLsByFingerprint(ctx, instrumentID)
+	if err != nil {
+		return nil, fmt.Errorf("query issues for alerts: %w", err)
+	}
+
 	var result []AlertRow
 	for rows.Next() {
 		var (
@@ -704,12 +711,38 @@ func (s *Store) QueryAlerts(ctx context.Context, instrumentID string) ([]AlertRo
 		if alertSilenced(silences, "helix.error", row.Fingerprint) {
 			continue
 		}
+		row.GithubIssueURL = issueURLs[row.Fingerprint]
 		result = append(result, row)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("rows: %w", err)
 	}
 	return result, nil
+}
+
+// issueURLsByFingerprint returns a map of error_fingerprint → GitHub issue URL
+// for all notification_issues belonging to the given instrument.
+func (s *Store) issueURLsByFingerprint(ctx context.Context, instrumentID string) (map[string]string, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT error_fingerprint, github_repo, github_issue_number
+		 FROM notification_issues
+		 WHERE instrument_id = $1`,
+		instrumentID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	m := make(map[string]string)
+	for rows.Next() {
+		var fp, repo string
+		var num int
+		if err := rows.Scan(&fp, &repo, &num); err != nil {
+			return nil, err
+		}
+		m[fp] = fmt.Sprintf("https://github.com/%s/issues/%d", repo, num)
+	}
+	return m, rows.Err()
 }
 
 // alertSilenced mirrors the silence.Store.IsSilenced logic without the cache layer.
