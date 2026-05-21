@@ -8,7 +8,7 @@ import (
 	"os"
 	"testing"
 
-	"github.com/HelixObs/gateway/internal/auth"
+	"github.com/HelixObs/herald/internal/auth"
 )
 
 func newTestConfigStore(t *testing.T, yaml string) *auth.ConfigStore {

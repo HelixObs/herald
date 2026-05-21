@@ -1,4 +1,4 @@
-// Package interceptor is the core intelligence layer of the HelixObs gateway.
+// Package interceptor is the core intelligence layer of the HelixObs herald.
 //
 // For every OTLP span that carries a helix.entity.id attribute the interceptor:
 //
@@ -28,10 +28,10 @@ import (
 	commonpb "go.opentelemetry.io/proto/otlp/common/v1"
 	tracepb "go.opentelemetry.io/proto/otlp/trace/v1"
 
-	"github.com/HelixObs/gateway/internal/db"
-	"github.com/HelixObs/gateway/internal/metrics"
-	"github.com/HelixObs/gateway/internal/notifier"
-	"github.com/HelixObs/gateway/internal/store"
+	"github.com/HelixObs/herald/internal/db"
+	"github.com/HelixObs/herald/internal/metrics"
+	"github.com/HelixObs/herald/internal/notifier"
+	"github.com/HelixObs/herald/internal/store"
 )
 
 const (

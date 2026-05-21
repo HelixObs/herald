@@ -3,7 +3,7 @@ package fingerprint_test
 import (
 	"testing"
 
-	"github.com/HelixObs/gateway/internal/notifier/fingerprint"
+	"github.com/HelixObs/herald/internal/notifier/fingerprint"
 )
 
 func TestNormalise(t *testing.T) {

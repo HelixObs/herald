@@ -3,7 +3,7 @@ package monitor
 import (
 	"strconv"
 
-	"github.com/HelixObs/gateway/internal/db"
+	"github.com/HelixObs/herald/internal/db"
 )
 
 func init() {

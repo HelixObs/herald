@@ -1,4 +1,4 @@
-// Package metrics registers and exposes the HelixObs gateway Prometheus metrics.
+// Package metrics registers and exposes the HelixObs herald Prometheus metrics.
 package metrics
 
 import (
@@ -7,14 +7,14 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 )
 
-// Metrics holds all counters, gauges, and histograms emitted by the gateway.
+// Metrics holds all counters, gauges, and histograms emitted by the herald.
 type Metrics struct {
 	// ── Pipeline throughput ───────────────────────────────────────────
 
 	// EntitiesTotal counts every entity span processed.
 	EntitiesTotal *prometheus.CounterVec
 
-	// SpansReceivedTotal counts every OTLP span arriving at the gateway.
+	// SpansReceivedTotal counts every OTLP span arriving at the herald.
 	SpansReceivedTotal prometheus.Counter
 
 	// SpansPassthroughTotal counts spans forwarded without helix processing.
@@ -138,7 +138,7 @@ func New(reg prometheus.Registerer) *Metrics {
 
 		SpansReceivedTotal: prometheus.NewCounter(prometheus.CounterOpts{
 			Name: "helix_spans_received_total",
-			Help: "Total OTLP spans received by the gateway.",
+			Help: "Total OTLP spans received by the herald.",
 		}),
 
 		SpansPassthroughTotal: prometheus.NewCounter(prometheus.CounterOpts{
@@ -184,7 +184,7 @@ func New(reg prometheus.Registerer) *Metrics {
 
 		TraceStoreMissesTotal: prometheus.NewCounter(prometheus.CounterOpts{
 			Name: "helix_trace_store_misses_total",
-			Help: "Failed parent lookups — parent not yet seen by this gateway.",
+			Help: "Failed parent lookups — parent not yet seen by this herald.",
 		}),
 
 		TraceStoreEvictionsTotal: prometheus.NewCounter(prometheus.CounterOpts{

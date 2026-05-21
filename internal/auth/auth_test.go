@@ -8,7 +8,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/HelixObs/gateway/internal/auth"
+	"github.com/HelixObs/herald/internal/auth"
 )
 
 // ── Issuer ────────────────────────────────────────────────────────────────────

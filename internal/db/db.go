@@ -1,4 +1,4 @@
-// Package db is the gateway's TimescaleDB persistence layer.
+// Package db is the herald's TimescaleDB persistence layer.
 //
 // Writes are called from goroutines in the interceptor — errors are returned
 // to the caller so it can log and increment the DB write error metric.

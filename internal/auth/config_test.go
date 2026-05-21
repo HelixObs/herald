@@ -4,7 +4,7 @@ import (
 	"os"
 	"testing"
 
-	"github.com/HelixObs/gateway/internal/auth"
+	"github.com/HelixObs/herald/internal/auth"
 )
 
 func TestConfigStore_LoadsSecretBackend(t *testing.T) {

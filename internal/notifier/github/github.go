@@ -12,8 +12,8 @@ import (
 	gh "github.com/google/go-github/v62/github"
 	"golang.org/x/oauth2"
 
-	"github.com/HelixObs/gateway/internal/db"
-	"github.com/HelixObs/gateway/internal/notifier"
+	"github.com/HelixObs/herald/internal/db"
+	"github.com/HelixObs/herald/internal/notifier"
 )
 
 // IssueDB is the subset of db.Store used by this backend.

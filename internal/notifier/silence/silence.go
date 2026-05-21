@@ -7,7 +7,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/HelixObs/gateway/internal/db"
+	"github.com/HelixObs/herald/internal/db"
 )
 
 // Store caches active silence rules per instrument with a short TTL to avoid

@@ -1,4 +1,4 @@
-module github.com/HelixObs/gateway
+module github.com/HelixObs/herald
 
 go 1.25.0
 

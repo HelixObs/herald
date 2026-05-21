@@ -9,7 +9,7 @@ import (
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 
-	"github.com/HelixObs/gateway/internal/auth"
+	"github.com/HelixObs/herald/internal/auth"
 	"golang.org/x/net/context"
 )
 

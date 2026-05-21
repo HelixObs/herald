@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/HelixObs/gateway/internal/store"
+	"github.com/HelixObs/herald/internal/store"
 )
 
 func ref(traceID, spanID byte) *store.SpanRef {

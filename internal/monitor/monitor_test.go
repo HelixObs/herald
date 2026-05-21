@@ -4,8 +4,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/HelixObs/gateway/internal/db"
-	"github.com/HelixObs/gateway/internal/monitor"
+	"github.com/HelixObs/herald/internal/db"
+	"github.com/HelixObs/herald/internal/monitor"
 )
 
 // mockPlugin is a test-local plugin for injection testing.

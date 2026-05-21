@@ -8,7 +8,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 
-	"github.com/HelixObs/gateway/internal/metrics"
+	"github.com/HelixObs/herald/internal/metrics"
 )
 
 func TestNewRegistersAllMetrics(t *testing.T) {

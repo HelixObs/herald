@@ -1,6 +1,6 @@
 //go:build e2e
 
-// Package e2e contains end-to-end tests for the HelixObs gateway.
+// Package e2e contains end-to-end tests for the HelixObs herald.
 //
 // Tests require the stack defined in e2e/docker-compose.yml to be running.
 // Run via the e2e CI workflow or locally:
@@ -49,12 +49,12 @@ func envOr(key, fallback string) string {
 // ── TestMain: wait for services ───────────────────────────────────────────────
 
 func TestMain(m *testing.M) {
-	fmt.Println("e2e: waiting for gateway...")
+	fmt.Println("e2e: waiting for herald...")
 	if err := waitForMetrics(30 * time.Second); err != nil {
-		fmt.Fprintf(os.Stderr, "e2e: gateway not ready: %v\n", err)
+		fmt.Fprintf(os.Stderr, "e2e: herald not ready: %v\n", err)
 		os.Exit(1)
 	}
-	fmt.Println("e2e: gateway ready")
+	fmt.Println("e2e: herald ready")
 	os.Exit(m.Run())
 }
 
@@ -183,7 +183,7 @@ func TestNonHelixSpanPassesThrough(t *testing.T) {
 	sendRawSpan(t, map[string]string{
 		"some.other.attr": "value",
 	})
-	// Give the gateway time to process.
+	// Give the herald time to process.
 	time.Sleep(2 * time.Second)
 
 	ctx := context.Background()

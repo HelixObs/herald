@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/HelixObs/gateway/internal/notifier/config"
+	"github.com/HelixObs/herald/internal/notifier/config"
 )
 
 func writeYAML(t *testing.T, dir, name, content string) string {

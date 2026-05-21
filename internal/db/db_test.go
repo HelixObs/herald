@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/HelixObs/gateway/internal/db"
+	"github.com/HelixObs/herald/internal/db"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 

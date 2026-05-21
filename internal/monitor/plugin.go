@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"regexp"
 
-	"github.com/HelixObs/gateway/internal/db"
+	"github.com/HelixObs/herald/internal/db"
 )
 
 // PlotConfig describes one y-axis interpretation available on the monitor.

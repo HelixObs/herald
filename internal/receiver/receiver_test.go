@@ -12,10 +12,10 @@ import (
 	tracepb "go.opentelemetry.io/proto/otlp/trace/v1"
 	"google.golang.org/grpc"
 
-	"github.com/HelixObs/gateway/internal/interceptor"
-	"github.com/HelixObs/gateway/internal/metrics"
-	"github.com/HelixObs/gateway/internal/receiver"
-	"github.com/HelixObs/gateway/internal/store"
+	"github.com/HelixObs/herald/internal/interceptor"
+	"github.com/HelixObs/herald/internal/metrics"
+	"github.com/HelixObs/herald/internal/receiver"
+	"github.com/HelixObs/herald/internal/store"
 )
 
 // ── Mock downstream collector ─────────────────────────────────────────────────

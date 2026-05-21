@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/HelixObs/gateway/internal/notifier"
-	"github.com/HelixObs/gateway/internal/notifier/slack"
+	"github.com/HelixObs/herald/internal/notifier"
+	"github.com/HelixObs/herald/internal/notifier/slack"
 )
 
 func webhookServer(t *testing.T, status int) (url string, requestCount *atomic.Int32) {

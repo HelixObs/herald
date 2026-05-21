@@ -11,9 +11,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/HelixObs/gateway/internal/db"
-	ghbackend "github.com/HelixObs/gateway/internal/notifier/github"
-	"github.com/HelixObs/gateway/internal/notifier"
+	"github.com/HelixObs/herald/internal/db"
+	ghbackend "github.com/HelixObs/herald/internal/notifier/github"
+	"github.com/HelixObs/herald/internal/notifier"
 )
 
 // ── fakeDB ────────────────────────────────────────────────────────────────────

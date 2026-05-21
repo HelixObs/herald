@@ -13,11 +13,11 @@ import (
 	commonpb "go.opentelemetry.io/proto/otlp/common/v1"
 	tracepb "go.opentelemetry.io/proto/otlp/trace/v1"
 
-	"github.com/HelixObs/gateway/internal/db"
-	"github.com/HelixObs/gateway/internal/interceptor"
-	"github.com/HelixObs/gateway/internal/metrics"
-	"github.com/HelixObs/gateway/internal/notifier"
-	"github.com/HelixObs/gateway/internal/store"
+	"github.com/HelixObs/herald/internal/db"
+	"github.com/HelixObs/herald/internal/interceptor"
+	"github.com/HelixObs/herald/internal/metrics"
+	"github.com/HelixObs/herald/internal/notifier"
+	"github.com/HelixObs/herald/internal/store"
 )
 
 // newInterceptor builds an Interceptor with a fresh store + metrics registry.

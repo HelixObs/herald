@@ -13,7 +13,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/HelixObs/gateway/internal/notifier"
+	"github.com/HelixObs/herald/internal/notifier"
 )
 
 // Client sends messages to a Slack webhook with exponential-backoff retry.

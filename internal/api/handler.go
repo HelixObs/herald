@@ -11,8 +11,8 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/HelixObs/gateway/internal/db"
-	"github.com/HelixObs/gateway/internal/monitor"
+	"github.com/HelixObs/herald/internal/db"
+	"github.com/HelixObs/herald/internal/monitor"
 )
 
 // Querier is the database interface the Handler depends on.

@@ -27,7 +27,7 @@ jobs:
           context: .
           push: true
           tags: |
-            ghcr.io/helixobs/gateway:latest
-            ghcr.io/helixobs/gateway:${{ github.sha }}
+            ghcr.io/helixobs/herald:latest
+            ghcr.io/helixobs/herald:${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max

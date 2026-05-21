@@ -19,23 +19,23 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/reflection"
 
-	"github.com/HelixObs/gateway/internal/api"
-	"github.com/HelixObs/gateway/internal/auth"
-	"github.com/HelixObs/gateway/internal/db"
-	"github.com/HelixObs/gateway/internal/interceptor"
-	"github.com/HelixObs/gateway/internal/metrics"
-	"github.com/HelixObs/gateway/internal/notifier"
-	notifiercfg "github.com/HelixObs/gateway/internal/notifier/config"
-	ghbackend "github.com/HelixObs/gateway/internal/notifier/github"
-	slackbackend "github.com/HelixObs/gateway/internal/notifier/slack"
-	"github.com/HelixObs/gateway/internal/notifier/silence"
-	"github.com/HelixObs/gateway/internal/receiver"
-	"github.com/HelixObs/gateway/internal/store"
+	"github.com/HelixObs/herald/internal/api"
+	"github.com/HelixObs/herald/internal/auth"
+	"github.com/HelixObs/herald/internal/db"
+	"github.com/HelixObs/herald/internal/interceptor"
+	"github.com/HelixObs/herald/internal/metrics"
+	"github.com/HelixObs/herald/internal/notifier"
+	notifiercfg "github.com/HelixObs/herald/internal/notifier/config"
+	ghbackend "github.com/HelixObs/herald/internal/notifier/github"
+	slackbackend "github.com/HelixObs/herald/internal/notifier/slack"
+	"github.com/HelixObs/herald/internal/notifier/silence"
+	"github.com/HelixObs/herald/internal/receiver"
+	"github.com/HelixObs/herald/internal/store"
 )
 
 func main() {
 	if err := run(); err != nil {
-		log.Fatalf("gateway: %v", err)
+		log.Fatalf("herald: %v", err)
 	}
 }
 
@@ -114,7 +114,7 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("listen %s: %w", cfg.listenAddr, err)
 	}
-	slog.Info("gateway listening", "addr", cfg.listenAddr, "collector", cfg.collectorEndpoint)
+	slog.Info("herald listening", "addr", cfg.listenAddr, "collector", cfg.collectorEndpoint)
 
 	// ── Prometheus HTTP ───────────────────────────────────────────────
 	promMux := http.NewServeMux()
@@ -181,7 +181,7 @@ type config struct {
 
 func configFromEnv() config {
 	return config{
-		listenAddr:        envOr("GATEWAY_ADDR", ":4317"),
+		listenAddr:        envOr("HERALD_ADDR", ":4317"),
 		collectorEndpoint: envOr("COLLECTOR_ENDPOINT", "otel-collector:4317"),
 		dbURL:             envOr("DB_URL", "postgres://helix:helix@db:5432/helixobs"),
 		metricsAddr:       envOr("METRICS_ADDR", ":2112"),

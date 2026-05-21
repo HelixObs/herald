@@ -11,11 +11,11 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 
-	"github.com/HelixObs/gateway/internal/db"
-	"github.com/HelixObs/gateway/internal/metrics"
-	"github.com/HelixObs/gateway/internal/notifier"
-	"github.com/HelixObs/gateway/internal/notifier/config"
-	"github.com/HelixObs/gateway/internal/notifier/silence"
+	"github.com/HelixObs/herald/internal/db"
+	"github.com/HelixObs/herald/internal/metrics"
+	"github.com/HelixObs/herald/internal/notifier"
+	"github.com/HelixObs/herald/internal/notifier/config"
+	"github.com/HelixObs/herald/internal/notifier/silence"
 )
 
 // ── Helpers ───────────────────────────────────────────────────────────────────

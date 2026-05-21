@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/HelixObs/gateway/internal/api"
-	"github.com/HelixObs/gateway/internal/db"
+	"github.com/HelixObs/herald/internal/api"
+	"github.com/HelixObs/herald/internal/db"
 )
 
 // mockQuerier satisfies api.Querier without a real DB.

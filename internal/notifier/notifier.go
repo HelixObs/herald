@@ -18,10 +18,10 @@ import (
 	"text/template"
 	"time"
 
-	"github.com/HelixObs/gateway/internal/metrics"
-	"github.com/HelixObs/gateway/internal/notifier/config"
-	"github.com/HelixObs/gateway/internal/notifier/fingerprint"
-	"github.com/HelixObs/gateway/internal/notifier/silence"
+	"github.com/HelixObs/herald/internal/metrics"
+	"github.com/HelixObs/herald/internal/notifier/config"
+	"github.com/HelixObs/herald/internal/notifier/fingerprint"
+	"github.com/HelixObs/herald/internal/notifier/silence"
 )
 
 // maxConcurrentDispatches caps concurrent outbound goroutines per backend type.

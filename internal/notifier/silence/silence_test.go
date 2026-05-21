@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/HelixObs/gateway/internal/db"
-	"github.com/HelixObs/gateway/internal/notifier/silence"
+	"github.com/HelixObs/herald/internal/db"
+	"github.com/HelixObs/herald/internal/notifier/silence"
 )
 
 type mockDB struct {
