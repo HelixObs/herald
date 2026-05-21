@@ -619,7 +619,8 @@ func TestListAlertsOK(t *testing.T) {
 		alerts: []db.AlertRow{
 			{
 				GroupKey:        "abc123",
-				Metadata:        map[string]string{"stage": "l1", "error": "timeout"},
+				Fingerprint:     "a1b2c3d4e5f6a7b8",
+				Metadata:        map[string]string{"stage": "l1", "message": "FPGA timeout"},
 				OccurrenceCount: 5,
 				FirstSeen:       time.Now().Add(-time.Hour),
 				LastSeen:        time.Now().Add(-time.Minute),
@@ -646,6 +647,9 @@ func TestListAlertsOK(t *testing.T) {
 	}
 	if out[0].EntityIDs[0] != "frb-1" {
 		t.Errorf("unexpected entity_ids: %v", out[0].EntityIDs)
+	}
+	if out[0].Fingerprint == "" {
+		t.Error("expected non-empty fingerprint")
 	}
 }
 

@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/HelixObs/herald/internal/notifier/fingerprint"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -622,6 +623,7 @@ func (s *Store) QueryInstruments(ctx context.Context) ([]string, error) {
 // AlertRow is one grouped helix.error alert returned by QueryAlerts.
 type AlertRow struct {
 	GroupKey        string            `json:"group_key"`
+	Fingerprint     string            `json:"fingerprint"`
 	Metadata        map[string]string `json:"metadata"`
 	OccurrenceCount int               `json:"occurrence_count"`
 	FirstSeen       time.Time         `json:"first_seen"`
@@ -671,6 +673,11 @@ func (s *Store) QueryAlerts(ctx context.Context, instrumentID string) ([]AlertRo
 		if row.EntityIDs == nil {
 			row.EntityIDs = []string{}
 		}
+		msg := row.Metadata["message"]
+		if msg == "" {
+			msg = row.Metadata["exception.message"]
+		}
+		row.Fingerprint = fingerprint.Compute(instrumentID, "helix.error", msg, row.Metadata["stage"])
 		result = append(result, row)
 	}
 	if err := rows.Err(); err != nil {
