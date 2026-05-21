@@ -593,3 +593,168 @@ func TestListSilencesWithMetrics(t *testing.T) {
 		t.Errorf("expected 200, got %d", rec.Code)
 	}
 }
+
+// ── alertQuerier ──────────────────────────────────────────────────────────────
+
+// alertQuerier wraps mockQuerier and also satisfies api.AlertStore.
+type alertQuerier struct {
+	mockQuerier
+	alerts      []db.AlertRow
+	instruments []string
+	err         error
+}
+
+func (a *alertQuerier) QueryAlerts(_ context.Context, _ string) ([]db.AlertRow, error) {
+	return a.alerts, a.err
+}
+
+func (a *alertQuerier) QueryInstruments(_ context.Context) ([]string, error) {
+	return a.instruments, a.err
+}
+
+// ── listAlerts ────────────────────────────────────────────────────────────────
+
+func TestListAlertsOK(t *testing.T) {
+	aq := &alertQuerier{
+		alerts: []db.AlertRow{
+			{
+				GroupKey:        "abc123",
+				Metadata:        map[string]string{"stage": "l1", "error": "timeout"},
+				OccurrenceCount: 5,
+				FirstSeen:       time.Now().Add(-time.Hour),
+				LastSeen:        time.Now().Add(-time.Minute),
+				EntityIDs:       []string{"frb-1", "frb-2"},
+			},
+		},
+	}
+	h := api.New(aq, nil, &noopMetrics{})
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/notifications/alerts?instrument_id=CHIME", nil)
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var out []db.AlertRow
+	if err := json.NewDecoder(rec.Body).Decode(&out); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(out) != 1 {
+		t.Errorf("expected 1 alert, got %d", len(out))
+	}
+	if out[0].OccurrenceCount != 5 {
+		t.Errorf("expected occurrence_count=5, got %d", out[0].OccurrenceCount)
+	}
+	if out[0].EntityIDs[0] != "frb-1" {
+		t.Errorf("unexpected entity_ids: %v", out[0].EntityIDs)
+	}
+}
+
+func TestListAlertsEmpty(t *testing.T) {
+	aq := &alertQuerier{alerts: []db.AlertRow{}}
+	h := api.New(aq, nil, &noopMetrics{})
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/notifications/alerts?instrument_id=CHIME", nil)
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d", rec.Code)
+	}
+	var out []db.AlertRow
+	if err := json.NewDecoder(rec.Body).Decode(&out); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if out == nil {
+		t.Error("expected non-nil empty slice, got null")
+	}
+}
+
+func TestListAlertsMissingParam(t *testing.T) {
+	aq := &alertQuerier{}
+	h := api.New(aq, nil, &noopMetrics{})
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/notifications/alerts", nil)
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d", rec.Code)
+	}
+}
+
+func TestListAlertsDBError(t *testing.T) {
+	aq := &alertQuerier{err: errors.New("db error")}
+	h := api.New(aq, nil, &noopMetrics{})
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/notifications/alerts?instrument_id=CHIME", nil)
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusInternalServerError {
+		t.Errorf("expected 500, got %d", rec.Code)
+	}
+}
+
+func TestListAlertsNilStore(t *testing.T) {
+	// nil querier → AlertStore cast returns nil → 500
+	h := api.New(nil, nil, &noopMetrics{})
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/notifications/alerts?instrument_id=CHIME", nil)
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusInternalServerError {
+		t.Errorf("expected 500, got %d", rec.Code)
+	}
+}
+
+// ── listInstruments ───────────────────────────────────────────────────────────
+
+func TestListInstrumentsOK(t *testing.T) {
+	aq := &alertQuerier{instruments: []string{"CHIMEFRB", "VLITE"}}
+	h := api.New(aq, nil, &noopMetrics{})
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/instruments", nil)
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var out []string
+	if err := json.NewDecoder(rec.Body).Decode(&out); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(out) != 2 || out[0] != "CHIMEFRB" {
+		t.Errorf("unexpected instruments: %v", out)
+	}
+}
+
+func TestListInstrumentsEmpty(t *testing.T) {
+	aq := &alertQuerier{instruments: []string{}}
+	h := api.New(aq, nil, &noopMetrics{})
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/instruments", nil)
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d", rec.Code)
+	}
+	var out []string
+	if err := json.NewDecoder(rec.Body).Decode(&out); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if out == nil {
+		t.Error("expected non-nil empty slice, got null")
+	}
+}
+
+func TestListInstrumentsDBError(t *testing.T) {
+	aq := &alertQuerier{err: errors.New("db error")}
+	h := api.New(aq, nil, &noopMetrics{})
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/instruments", nil)
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusInternalServerError {
+		t.Errorf("expected 500, got %d", rec.Code)
+	}
+}
+
+func TestListInstrumentsNilStore(t *testing.T) {
+	h := api.New(nil, nil, &noopMetrics{})
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/instruments", nil)
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusInternalServerError {
+		t.Errorf("expected 500, got %d", rec.Code)
+	}
+}
