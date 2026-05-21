@@ -180,7 +180,11 @@ func buildBody(p notifier.SCMParams, occurrences int, firstSeen, lastSeen time.T
 		shown++
 	}
 
-	fmt.Fprintf(&sb, "\n---\n*Tracked automatically by HelixObs. Do not close manually — use the silence API to suppress.*")
+	sb.WriteString("\n---\n*Tracked automatically by HelixObs.")
+	if p.NotificationsURL != "" {
+		fmt.Fprintf(&sb, " [Manage silences](%s).", p.NotificationsURL)
+	}
+	sb.WriteString(" Do not close manually — use the silence API to suppress.*")
 	return sb.String()
 }
 

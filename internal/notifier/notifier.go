@@ -12,6 +12,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"sort"
 	"strings"
 	"sync"
@@ -142,6 +143,8 @@ func (n *Notifier) dispatch(ctx context.Context, e Event) {
 
 	inspectorURL := fmt.Sprintf("%s/entity/%s", n.uiBase, e.EntityID)
 	errEntitiesURL := fmt.Sprintf("%s/d/helix-error-entities", n.grafana)
+	notificationsURL := fmt.Sprintf("%s/notifications?instrument_id=%s&fingerprint=%s",
+		n.uiBase, url.QueryEscape(e.InstrumentID), fp)
 
 	// SCM backends (GitHub, etc.) run first. We wait for all of them so that
 	// messaging backends (Slack, etc.) can include the issue URLs in their messages.
@@ -165,7 +168,7 @@ func (n *Notifier) dispatch(ctx context.Context, e Event) {
 			go func() {
 				defer func() { <-sem }()
 				defer wg.Done()
-				if u := n.doSCM(ctx, e, sc, backend, fp, inspectorURL); u != "" {
+				if u := n.doSCM(ctx, e, sc, backend, fp, inspectorURL, notificationsURL); u != "" {
 					urlMu.Lock()
 					issueURLs = append(issueURLs, u)
 					urlMu.Unlock()
@@ -192,7 +195,7 @@ func (n *Notifier) dispatch(ctx context.Context, e Event) {
 		case sem <- struct{}{}:
 			go func() {
 				defer func() { <-sem }()
-				n.doMessaging(ctx, e, mc, backend, fp, inspectorURL, errEntitiesURL, issueURLs)
+				n.doMessaging(ctx, e, mc, backend, fp, inspectorURL, errEntitiesURL, notificationsURL, issueURLs)
 			}()
 		default:
 			n.metrics.NotificationChannelDropsTotal.Inc()
@@ -203,9 +206,9 @@ func (n *Notifier) dispatch(ctx context.Context, e Event) {
 }
 
 func (n *Notifier) doMessaging(ctx context.Context, e Event, mc config.MessagingCall,
-	backend MessagingBackend, fp, inspectorURL, errEntitiesURL string, issueURLs []string) {
+	backend MessagingBackend, fp, inspectorURL, errEntitiesURL, notificationsURL string, issueURLs []string) {
 
-	msg := n.buildMsg(e, mc.MessageTemplate, inspectorURL, errEntitiesURL, issueURLs)
+	msg := n.buildMsg(e, mc.MessageTemplate, inspectorURL, errEntitiesURL, notificationsURL, issueURLs)
 
 	start := time.Now()
 	sent, err := backend.Send(ctx, mc.Destination, fp, msg, mc.SampleWindowSeconds, mc.MaxPerWindow)
@@ -231,7 +234,7 @@ func (n *Notifier) fpLock(fp string) *sync.Mutex {
 
 // doSCM dispatches to one SCM backend and returns the resulting issue URL (empty on error).
 func (n *Notifier) doSCM(ctx context.Context, e Event, sc config.SCMCall,
-	backend SCMBackend, fp, inspectorURL string) string {
+	backend SCMBackend, fp, inspectorURL, notificationsURL string) string {
 
 	// Serialise concurrent dispatches for the same fingerprint. Without this, a burst
 	// of N events with identical messages (e.g. queued spans flushed after reconnect)
@@ -248,20 +251,21 @@ func (n *Notifier) doSCM(ctx context.Context, e Event, sc config.SCMCall,
 
 	start := time.Now()
 	issueURL, err := backend.Dispatch(ctx, SCMParams{
-		Token:         sc.Token,
-		Repo:          sc.Repo,
-		Labels:        sc.Labels,
-		Title:         title,
-		EntityID:      e.EntityID,
-		InspectorURL:  inspectorURL,
-		InspectorBase: fmt.Sprintf("%s/entity", n.uiBase),
-		EventName:     e.EventName,
-		Message:       e.Message,
-		Stage:         e.Stage,
-		Timestamp:     time.Unix(0, e.TimestampNs),
-		Fingerprint:   fp,
-		InstrumentID:  e.InstrumentID,
-		OnRecurrence:  sc.OnRecurrenceAfterClose,
+		Token:            sc.Token,
+		Repo:             sc.Repo,
+		Labels:           sc.Labels,
+		Title:            title,
+		EntityID:         e.EntityID,
+		InspectorURL:     inspectorURL,
+		InspectorBase:    fmt.Sprintf("%s/entity", n.uiBase),
+		EventName:        e.EventName,
+		Message:          e.Message,
+		Stage:            e.Stage,
+		Timestamp:        time.Unix(0, e.TimestampNs),
+		Fingerprint:      fp,
+		InstrumentID:     e.InstrumentID,
+		OnRecurrence:     sc.OnRecurrenceAfterClose,
+		NotificationsURL: notificationsURL,
 	})
 	dur := time.Since(start)
 	if err != nil {
@@ -294,19 +298,20 @@ func (n *Notifier) flushDigests(ctx context.Context) {
 
 // buildMsg constructs a Message for messaging backends.
 // issueURLs contains GitHub/GitLab issue URLs already created for this event.
-func (n *Notifier) buildMsg(e Event, messageTemplate, inspectorURL, errEntitiesURL string, issueURLs []string) Message {
+func (n *Notifier) buildMsg(e Event, messageTemplate, inspectorURL, errEntitiesURL, notificationsURL string, issueURLs []string) Message {
 	text := n.buildText(e, messageTemplate, inspectorURL, errEntitiesURL)
 	return Message{
-		Text:         text,
-		InstrumentID: e.InstrumentID,
-		EventName:    e.EventName,
-		EntityID:     e.EntityID,
-		Body:         e.Message,
-		Stage:        e.Stage,
-		InspectorURL: inspectorURL,
-		ErrDashURL:   errEntitiesURL,
-		IssueURLs:    issueURLs,
-		Metadata:     e.Metadata,
+		Text:             text,
+		InstrumentID:     e.InstrumentID,
+		EventName:        e.EventName,
+		EntityID:         e.EntityID,
+		Body:             e.Message,
+		Stage:            e.Stage,
+		InspectorURL:     inspectorURL,
+		ErrDashURL:       errEntitiesURL,
+		NotificationsURL: notificationsURL,
+		IssueURLs:        issueURLs,
+		Metadata:         e.Metadata,
 	}
 }
 

@@ -27,7 +27,7 @@ type windowState struct {
 	windowStart time.Time
 	count       int
 	suppressed  int
-	lastText    string // plain-text fallback for digest messages
+	lastMsg     notifier.Message // last suppressed message, used for digest block kit
 }
 
 // New creates a Slack client.
@@ -49,15 +49,14 @@ func (c *Client) Send(ctx context.Context, webhookURL, fingerprint string, msg n
 	if !ok || now.Sub(ws.windowStart) >= time.Duration(windowSecs)*time.Second {
 		// New window — flush digest for old window if there were suppressions.
 		if ok && ws.suppressed > 0 {
-			digestText := fmt.Sprintf("%d more occurrence(s) suppressed in the last %ds. Last: %s",
-				ws.suppressed, windowSecs, ws.lastText)
+			body := buildDigestBlockKit(ws.suppressed, windowSecs, fingerprint, ws.lastMsg)
 			c.mu.Unlock()
-			if err := c.sendText(ctx, webhookURL, digestText); err != nil {
+			if err := c.post(ctx, webhookURL, body); err != nil {
 				slog.Warn("slack: digest send failed", "fingerprint", fingerprint, "error", err)
 			}
 			c.mu.Lock()
 		}
-		c.windows[fingerprint] = &windowState{windowStart: now, count: 1, lastText: msg.Text}
+		c.windows[fingerprint] = &windowState{windowStart: now, count: 1, lastMsg: msg}
 		c.mu.Unlock()
 		return true, c.sendBlocks(ctx, webhookURL, fingerprint, msg)
 	}
@@ -65,7 +64,7 @@ func (c *Client) Send(ctx context.Context, webhookURL, fingerprint string, msg n
 	ws.count++
 	if ws.count > maxPerWindow {
 		ws.suppressed++
-		ws.lastText = msg.Text
+		ws.lastMsg = msg
 		c.mu.Unlock()
 		return false, nil
 	}
@@ -78,38 +77,96 @@ func (c *Client) Send(ctx context.Context, webhookURL, fingerprint string, msg n
 func (c *Client) FlushDigests(ctx context.Context, webhookURL string, windowSecs int) {
 	c.mu.Lock()
 	type pending struct {
-		fingerprint string
-		suppressed  int
-		lastText    string
+		fp         string
+		suppressed int
+		lastMsg    notifier.Message
 	}
 	var toFlush []pending
 	now := time.Now()
 	for fp, ws := range c.windows {
 		if ws.suppressed > 0 && now.Sub(ws.windowStart) >= time.Duration(windowSecs)*time.Second {
-			toFlush = append(toFlush, pending{fp, ws.suppressed, ws.lastText})
+			toFlush = append(toFlush, pending{fp, ws.suppressed, ws.lastMsg})
 			delete(c.windows, fp)
 		}
 	}
 	c.mu.Unlock()
 
 	for _, f := range toFlush {
-		text := fmt.Sprintf("%d more occurrence(s) suppressed in the last %ds. Last: %s",
-			f.suppressed, windowSecs, f.lastText)
-		if err := c.sendText(ctx, webhookURL, text); err != nil {
-			slog.Warn("slack: digest flush failed", "fingerprint", f.fingerprint, "error", err)
+		body := buildDigestBlockKit(f.suppressed, windowSecs, f.fp, f.lastMsg)
+		if err := c.post(ctx, webhookURL, body); err != nil {
+			slog.Warn("slack: digest flush failed", "fingerprint", f.fp, "error", err)
 		}
 	}
+}
+
+// buildDigestBlockKit renders a Block Kit summary for suppressed occurrences.
+func buildDigestBlockKit(suppressed, windowSecs int, fp string, last notifier.Message) []byte {
+	header := fmt.Sprintf(":rotating_light:  [%s] %s", last.InstrumentID, last.EventName)
+	mainText := fmt.Sprintf(":zzz: *%d more occurrence(s) suppressed* in the last %ds\nLast: %s",
+		suppressed, windowSecs, escMrkdwn(last.Body))
+
+	fpShort := fp
+	if len(fp) > 8 {
+		fpShort = fp[:8]
+	}
+
+	elements := []any{
+		map[string]any{
+			"type":  "button",
+			"text":  map[string]any{"type": "plain_text", "text": ":mag: Inspect Entity", "emoji": true},
+			"url":   last.InspectorURL,
+			"style": "primary",
+		},
+		map[string]any{
+			"type": "button",
+			"text": map[string]any{"type": "plain_text", "text": ":bar_chart: Error Dashboard", "emoji": true},
+			"url":  last.ErrDashURL,
+		},
+	}
+	if last.NotificationsURL != "" {
+		elements = append(elements, map[string]any{
+			"type": "button",
+			"text": map[string]any{"type": "plain_text", "text": ":no_bell: Manage Silences", "emoji": true},
+			"url":  last.NotificationsURL,
+		})
+	}
+
+	var ctxParts []string
+	ctxParts = append(ctxParts, fmt.Sprintf("Fingerprint: `%s`", fpShort))
+	ctxParts = append(ctxParts, "HelixObs")
+
+	blocks := []any{
+		map[string]any{
+			"type": "header",
+			"text": map[string]any{"type": "plain_text", "text": header, "emoji": true},
+		},
+		map[string]any{
+			"type": "section",
+			"text": map[string]any{"type": "mrkdwn", "text": mainText},
+		},
+		map[string]any{
+			"type": "section",
+			"fields": []any{
+				map[string]any{"type": "mrkdwn", "text": fmt.Sprintf(":id:  *Entity*\n`%s`", last.EntityID)},
+				map[string]any{"type": "mrkdwn", "text": fmt.Sprintf(":telescope:  *Instrument*\n%s", last.InstrumentID)},
+			},
+		},
+		map[string]any{"type": "actions", "elements": elements},
+		map[string]any{
+			"type": "context",
+			"elements": []any{
+				map[string]any{"type": "mrkdwn", "text": strings.Join(ctxParts, "  •  ")},
+			},
+		},
+	}
+
+	payload, _ := json.Marshal(map[string]any{"blocks": blocks})
+	return payload
 }
 
 // sendBlocks posts a Slack Block Kit message built from msg.
 func (c *Client) sendBlocks(ctx context.Context, webhookURL, fingerprint string, msg notifier.Message) error {
 	body := buildBlockKit(fingerprint, msg)
-	return c.post(ctx, webhookURL, body)
-}
-
-// sendText posts a plain {"text": "..."} message (used for digest summaries).
-func (c *Client) sendText(ctx context.Context, webhookURL, text string) error {
-	body, _ := json.Marshal(map[string]string{"text": text})
 	return c.post(ctx, webhookURL, body)
 }
 
@@ -161,6 +218,27 @@ func buildBlockKit(fp string, msg notifier.Message) []byte {
 	ctxParts = append(ctxParts, fmt.Sprintf("Fingerprint: `%s`", fpShort))
 	ctxParts = append(ctxParts, "HelixObs")
 
+	actionElements := []any{
+		map[string]any{
+			"type":  "button",
+			"text":  map[string]any{"type": "plain_text", "text": ":mag: Inspect Entity", "emoji": true},
+			"url":   msg.InspectorURL,
+			"style": "primary",
+		},
+		map[string]any{
+			"type": "button",
+			"text": map[string]any{"type": "plain_text", "text": ":bar_chart: Error Dashboard", "emoji": true},
+			"url":  msg.ErrDashURL,
+		},
+	}
+	if msg.NotificationsURL != "" {
+		actionElements = append(actionElements, map[string]any{
+			"type": "button",
+			"text": map[string]any{"type": "plain_text", "text": ":no_bell: Manage Silences", "emoji": true},
+			"url":  msg.NotificationsURL,
+		})
+	}
+
 	blocks := []any{
 		map[string]any{
 			"type": "header",
@@ -178,20 +256,8 @@ func buildBlockKit(fp string, msg notifier.Message) []byte {
 			},
 		},
 		map[string]any{
-			"type": "actions",
-			"elements": []any{
-				map[string]any{
-					"type":  "button",
-					"text":  map[string]any{"type": "plain_text", "text": ":mag: Inspect Entity", "emoji": true},
-					"url":   msg.InspectorURL,
-					"style": "primary",
-				},
-				map[string]any{
-					"type": "button",
-					"text": map[string]any{"type": "plain_text", "text": ":bar_chart: Error Dashboard", "emoji": true},
-					"url":  msg.ErrDashURL,
-				},
-			},
+			"type":     "actions",
+			"elements": actionElements,
 		},
 		map[string]any{
 			"type": "context",

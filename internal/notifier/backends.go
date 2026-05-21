@@ -8,16 +8,17 @@ import (
 // Message is the platform-agnostic notification payload passed to MessagingBackend.Send.
 // Each backend renders it into its own format (Slack Block Kit, Discord embeds, etc.).
 type Message struct {
-	Text         string            // plain-text fallback used in digest summaries
-	InstrumentID string
-	EventName    string
-	EntityID     string
-	Body         string            // human-readable error/event message
-	Stage        string
-	InspectorURL string
-	ErrDashURL   string
-	IssueURLs    []string          // issue URLs from SCM backends, e.g. "https://github.com/org/repo/issues/1"
-	Metadata     map[string]string // event metadata fields (e.g. process name, custom attributes)
+	Text             string            // plain-text fallback used in digest summaries
+	InstrumentID     string
+	EventName        string
+	EntityID         string
+	Body             string            // human-readable error/event message
+	Stage            string
+	InspectorURL     string
+	ErrDashURL       string
+	NotificationsURL string            // deep-link to the Notifications page for this fingerprint
+	IssueURLs        []string          // issue URLs from SCM backends, e.g. "https://github.com/org/repo/issues/1"
+	Metadata         map[string]string // event metadata fields (e.g. process name, custom attributes)
 }
 
 // MessagingBackend sends rate-limited notifications to a messaging platform
@@ -41,18 +42,19 @@ type SCMBackend interface {
 
 // SCMParams is the platform-agnostic payload for creating or updating an issue.
 type SCMParams struct {
-	Token         string
-	Repo          string
-	Labels        []string
-	Title         string
-	EntityID      string
-	InspectorURL  string
-	InspectorBase string
-	EventName     string
-	Message       string
-	Stage         string
-	Timestamp     time.Time
-	Fingerprint   string
-	InstrumentID  string
-	OnRecurrence  string // "reopen" or "new_issue"
+	Token            string
+	Repo             string
+	Labels           []string
+	Title            string
+	EntityID         string
+	InspectorURL     string
+	InspectorBase    string
+	EventName        string
+	Message          string
+	Stage            string
+	Timestamp        time.Time
+	Fingerprint      string
+	InstrumentID     string
+	OnRecurrence     string // "reopen" or "new_issue"
+	NotificationsURL string // deep-link to the Notifications page for this fingerprint
 }
