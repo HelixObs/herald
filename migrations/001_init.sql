@@ -1,10 +1,10 @@
--- HelixObs gateway schema
+-- HelixObs herald schema
 -- Applies automatically on first container start via /docker-entrypoint-initdb.d
 
 CREATE EXTENSION IF NOT EXISTS timescaledb;
 
 -- ── Entities ──────────────────────────────────────────────────────────────────
--- One row per entity span processed by the gateway.
+-- One row per entity span processed by the herald.
 -- parent_ids is a TEXT[] so the recursive CTE provenance query can use
 -- the GIN index for "find all children of entity X" lookups.
 -- metadata holds domain-specific span attributes (helix.chime.*, etc.) as JSONB.
@@ -76,7 +76,7 @@ CREATE INDEX IF NOT EXISTS idx_entity_operations_op_time
 
 
 -- ── Entity events ─────────────────────────────────────────────────────────────
--- One row per helix.* span event extracted by the gateway interceptor.
+-- One row per helix.* span event extracted by the herald interceptor.
 -- Covers helix.error, helix.event.rfi_flagged, helix.event.candidate_promoted,
 -- helix.event.voevent_issued, helix.event.archived, etc.
 -- The event's own timestamp (from the OTel span event) is stored as timestamp_ns

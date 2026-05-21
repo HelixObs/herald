@@ -33,7 +33,7 @@ type SilenceStore interface {
 	ListSilences(ctx context.Context, instrumentID string) ([]db.Silence, error)
 }
 
-// apiMetrics is the subset of gateway metrics used by the API handler.
+// apiMetrics is the subset of herald metrics used by the API handler.
 type apiMetrics interface {
 	APIRequestRecord(handler, status string, dur time.Duration)
 }

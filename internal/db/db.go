@@ -56,7 +56,7 @@ type EntityEvent struct {
 	Metadata     map[string]string
 }
 
-// dbMetrics is the subset of gateway metrics used by the DB store.
+// dbMetrics is the subset of herald metrics used by the DB store.
 type dbMetrics interface {
 	DBWriteRecord(table, status string, dur time.Duration)
 	DBQueryRecord(query, status string, dur time.Duration)

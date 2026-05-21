@@ -239,7 +239,7 @@ func (d *ctxTrackingDB) DeleteNotificationIssue(_ context.Context, _, _, _ strin
 type ctxMarkerKey struct{}
 
 // TestDispatch_UpsertUsesBackgroundContext verifies the context.Background() fix:
-// UpsertNotificationIssue must not use the caller's context so that a gateway
+// UpsertNotificationIssue must not use the caller's context so that a herald
 // shutdown cannot orphan a GitHub issue that was already created.
 func TestDispatch_UpsertUsesBackgroundContext(t *testing.T) {
 	issue := &issueState{}

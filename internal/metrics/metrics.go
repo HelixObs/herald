@@ -20,7 +20,7 @@ type Metrics struct {
 	// SpansPassthroughTotal counts spans forwarded without helix processing.
 	SpansPassthroughTotal prometheus.Counter
 
-	// SpanProcessingDuration measures end-to-end gateway processing time per span.
+	// SpanProcessingDuration measures end-to-end herald processing time per span.
 	SpanProcessingDuration *prometheus.HistogramVec
 
 	// ── Entity events ─────────────────────────────────────────────────
@@ -148,7 +148,7 @@ func New(reg prometheus.Registerer) *Metrics {
 
 		SpanProcessingDuration: prometheus.NewHistogramVec(prometheus.HistogramOpts{
 			Name:    "helix_span_processing_duration_seconds",
-			Help:    "End-to-end gateway processing time per helix span.",
+			Help:    "End-to-end herald processing time per helix span.",
 			Buckets: []float64{.0001, .0005, .001, .005, .01, .025, .05, .1, .25, .5},
 		}, []string{"instrument_id"}),
 

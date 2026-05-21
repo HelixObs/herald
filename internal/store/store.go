@@ -1,6 +1,6 @@
 // Package store holds the server-side in-process trace store.
 //
-// The gateway maps entity_id → (traceID, spanID) so it can resolve
+// The herald maps entity_id → (traceID, spanID) so it can resolve
 // helix.parent.ids into OTel span links when child spans arrive.
 // Cross-process parents whose child arrives before the parent is known
 // are not linked (a metric is incremented instead); the helix.parent.ids
@@ -19,7 +19,7 @@ type SpanRef struct {
 	SpanID  []byte
 }
 
-// storeMetrics is the subset of gateway metrics used by the trace store.
+// storeMetrics is the subset of herald metrics used by the trace store.
 // Using an interface keeps the store package free of an import cycle.
 type storeMetrics interface {
 	TraceStoreHit()
