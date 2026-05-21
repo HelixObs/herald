@@ -64,8 +64,8 @@ migrations/
   003_trace_dedup.sql   operation_trace_seen dedup table
   004_sherlock_usage.sql    sherlock_usage cost ledger hypertable
   008_notifications.sql     notification_issues and notification_silences tables
-instruments/
-  chime-context.yml     Reference CHIME notification config (canonical, shared with Sherlock)
+deploy/instruments/
+  example-instrument.yml  Template; copy to <id>-context.yml and fill in your values
 ```
 
 ## Span attribute contract (shared with client library)
@@ -269,7 +269,7 @@ openssl rand -hex 32
 # 2. Compute the hash (store this in instrument YAML — safe to commit):
 echo -n "<secret>" | sha256sum
 
-# 3. Add to instruments/my-telescope.yml:
+# 3. Add to deploy/instruments/my-telescope.yml:
 # auth:
 #   type: secret
 #   api_key_hash: "sha256:<hash-from-step-2>"
