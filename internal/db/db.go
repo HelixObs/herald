@@ -631,9 +631,17 @@ type AlertRow struct {
 	EntityIDs       []string          `json:"entity_ids"`
 }
 
-// QueryAlerts returns helix.error events for an instrument from the last 7 days,
-// grouped by metadata content so identical errors are collapsed into one row.
+// QueryAlerts returns unsilenced helix.error events for an instrument from the
+// last 7 days, grouped by metadata content so identical errors are collapsed.
+// Alerts matched by an active silence rule are excluded.
 func (s *Store) QueryAlerts(ctx context.Context, instrumentID string) ([]AlertRow, error) {
+	// Fetch active silences first so we can filter in Go (fingerprint normalisation
+	// can't be replicated in SQL).
+	silences, err := s.ActiveSilences(ctx, instrumentID)
+	if err != nil {
+		return nil, fmt.Errorf("query silences for alert filter: %w", err)
+	}
+
 	start := time.Now()
 	rows, err := s.pool.Query(ctx, `
 		WITH errors AS (
@@ -678,12 +686,33 @@ func (s *Store) QueryAlerts(ctx context.Context, instrumentID string) ([]AlertRo
 			msg = row.Metadata["exception.message"]
 		}
 		row.Fingerprint = fingerprint.Compute(instrumentID, "helix.error", msg, row.Metadata["stage"])
+		if alertSilenced(silences, "helix.error", row.Fingerprint) {
+			continue
+		}
 		result = append(result, row)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("rows: %w", err)
 	}
 	return result, nil
+}
+
+// alertSilenced mirrors the silence.Store.IsSilenced logic without the cache layer.
+func alertSilenced(silences []Silence, eventType, fp string) bool {
+	for _, sl := range silences {
+		if sl.EventType == "" {
+			return true // instrument-wide silence
+		}
+		if sl.EventType == eventType {
+			if sl.Fingerprint == "" {
+				return true // all events of this type
+			}
+			if sl.Fingerprint == fp {
+				return true // specific fingerprint
+			}
+		}
+	}
+	return false
 }
 
 // WriteEntityEvent inserts one entity_event row.
