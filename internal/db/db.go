@@ -597,6 +597,66 @@ func (s *Store) ListSilences(ctx context.Context, instrumentID string) ([]Silenc
 	return silences, rows.Err()
 }
 
+// AlertRow is one grouped helix.error alert returned by QueryAlerts.
+type AlertRow struct {
+	GroupKey        string            `json:"group_key"`
+	Metadata        map[string]string `json:"metadata"`
+	OccurrenceCount int               `json:"occurrence_count"`
+	FirstSeen       time.Time         `json:"first_seen"`
+	LastSeen        time.Time         `json:"last_seen"`
+	EntityIDs       []string          `json:"entity_ids"`
+}
+
+// QueryAlerts returns helix.error events for an instrument from the last 7 days,
+// grouped by metadata content so identical errors are collapsed into one row.
+func (s *Store) QueryAlerts(ctx context.Context, instrumentID string) ([]AlertRow, error) {
+	start := time.Now()
+	rows, err := s.pool.Query(ctx, `
+		WITH errors AS (
+			SELECT entity_id, metadata, created_at, md5(metadata::text) AS grp
+			FROM entity_events
+			WHERE instrument_id = $1
+			  AND event_name = 'helix.error'
+			  AND created_at > now() - INTERVAL '7 days'
+		)
+		SELECT grp, metadata, COUNT(*) AS occurrence_count,
+		       MIN(created_at) AS first_seen, MAX(created_at) AS last_seen,
+		       COALESCE((array_agg(entity_id ORDER BY created_at DESC))[1:5], '{}') AS entity_ids
+		FROM errors
+		GROUP BY grp, metadata
+		ORDER BY last_seen DESC
+		LIMIT 50`,
+		instrumentID,
+	)
+	s.recordQuery("alerts", err, start)
+	if err != nil {
+		return nil, fmt.Errorf("query alerts: %w", err)
+	}
+	defer rows.Close()
+
+	var result []AlertRow
+	for rows.Next() {
+		var (
+			row     AlertRow
+			metaRaw []byte
+		)
+		if err := rows.Scan(&row.GroupKey, &metaRaw, &row.OccurrenceCount, &row.FirstSeen, &row.LastSeen, &row.EntityIDs); err != nil {
+			return nil, fmt.Errorf("scan: %w", err)
+		}
+		if err := json.Unmarshal(metaRaw, &row.Metadata); err != nil {
+			row.Metadata = map[string]string{}
+		}
+		if row.EntityIDs == nil {
+			row.EntityIDs = []string{}
+		}
+		result = append(result, row)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("rows: %w", err)
+	}
+	return result, nil
+}
+
 // WriteEntityEvent inserts one entity_event row.
 func (s *Store) WriteEntityEvent(ctx context.Context, ev EntityEvent) error {
 	meta, err := json.Marshal(ev.Metadata)

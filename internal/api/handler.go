@@ -33,6 +33,11 @@ type SilenceStore interface {
 	ListSilences(ctx context.Context, instrumentID string) ([]db.Silence, error)
 }
 
+// AlertStore is the database interface for querying active alerts.
+type AlertStore interface {
+	QueryAlerts(ctx context.Context, instrumentID string) ([]db.AlertRow, error)
+}
+
 // apiMetrics is the subset of herald metrics used by the API handler.
 type apiMetrics interface {
 	APIRequestRecord(handler, status string, dur time.Duration)
@@ -43,6 +48,7 @@ type Handler struct {
 	db      Querier
 	monitor MonitorStore
 	silence SilenceStore
+	alerts  AlertStore
 	m       apiMetrics
 	mux     *http.ServeMux
 }
@@ -50,7 +56,8 @@ type Handler struct {
 // New registers all API routes and returns a ready Handler.
 func New(d Querier, ms MonitorStore, m apiMetrics) *Handler {
 	ss, _ := d.(SilenceStore) // db.Store implements SilenceStore; cast is safe
-	h := &Handler{db: d, monitor: ms, silence: ss, m: m, mux: http.NewServeMux()}
+	as, _ := d.(AlertStore)   // db.Store implements AlertStore; cast is safe
+	h := &Handler{db: d, monitor: ms, silence: ss, alerts: as, m: m, mux: http.NewServeMux()}
 	h.mux.HandleFunc("GET /api/v1/entity/{entity_id}/graph", h.entityGraph)
 	h.mux.HandleFunc("GET /api/v1/entity/{entity_id}/operations", h.entityOperations)
 	h.mux.HandleFunc("GET /api/v1/monitor/bins", h.monitorBins)
@@ -58,6 +65,7 @@ func New(d Querier, ms MonitorStore, m apiMetrics) *Handler {
 	h.mux.HandleFunc("POST /api/v1/notifications/silence", h.createSilence)
 	h.mux.HandleFunc("DELETE /api/v1/notifications/silence/{id}", h.deleteSilence)
 	h.mux.HandleFunc("GET /api/v1/notifications/silences", h.listSilences)
+	h.mux.HandleFunc("GET /api/v1/notifications/alerts", h.listAlerts)
 	return h
 }
 
@@ -153,6 +161,37 @@ func (h *Handler) listSilences(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(silences) //nolint:errcheck
 	h.m.APIRequestRecord("list_silences", "200", time.Since(start))
+}
+
+// listAlerts returns grouped helix.error events from the last 7 days.
+//
+// GET /api/v1/notifications/alerts?instrument_id=CHIMEFRB
+func (h *Handler) listAlerts(w http.ResponseWriter, r *http.Request) {
+	start := time.Now()
+	instrumentID := r.URL.Query().Get("instrument_id")
+	if instrumentID == "" {
+		http.Error(w, "instrument_id query param required", http.StatusBadRequest)
+		h.m.APIRequestRecord("list_alerts", "400", time.Since(start))
+		return
+	}
+	if h.alerts == nil {
+		http.Error(w, "alerts store not configured", http.StatusInternalServerError)
+		h.m.APIRequestRecord("list_alerts", "500", time.Since(start))
+		return
+	}
+	alerts, err := h.alerts.QueryAlerts(r.Context(), instrumentID)
+	if err != nil {
+		slog.Error("list alerts failed", "error", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		h.m.APIRequestRecord("list_alerts", "500", time.Since(start))
+		return
+	}
+	if alerts == nil {
+		alerts = []db.AlertRow{}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(alerts) //nolint:errcheck
+	h.m.APIRequestRecord("list_alerts", "200", time.Since(start))
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
