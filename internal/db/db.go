@@ -597,6 +597,28 @@ func (s *Store) ListSilences(ctx context.Context, instrumentID string) ([]Silenc
 	return silences, rows.Err()
 }
 
+// QueryInstruments returns all distinct instrument IDs that have sent data.
+func (s *Store) QueryInstruments(ctx context.Context) ([]string, error) {
+	start := time.Now()
+	rows, err := s.pool.Query(ctx,
+		`SELECT DISTINCT instrument_id FROM entities ORDER BY instrument_id LIMIT 100`,
+	)
+	s.recordQuery("instruments", err, start)
+	if err != nil {
+		return nil, fmt.Errorf("query instruments: %w", err)
+	}
+	defer rows.Close()
+	var result []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("scan: %w", err)
+		}
+		result = append(result, id)
+	}
+	return result, rows.Err()
+}
+
 // AlertRow is one grouped helix.error alert returned by QueryAlerts.
 type AlertRow struct {
 	GroupKey        string            `json:"group_key"`

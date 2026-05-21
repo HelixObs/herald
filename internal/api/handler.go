@@ -36,6 +36,7 @@ type SilenceStore interface {
 // AlertStore is the database interface for querying active alerts.
 type AlertStore interface {
 	QueryAlerts(ctx context.Context, instrumentID string) ([]db.AlertRow, error)
+	QueryInstruments(ctx context.Context) ([]string, error)
 }
 
 // apiMetrics is the subset of herald metrics used by the API handler.
@@ -66,6 +67,7 @@ func New(d Querier, ms MonitorStore, m apiMetrics) *Handler {
 	h.mux.HandleFunc("DELETE /api/v1/notifications/silence/{id}", h.deleteSilence)
 	h.mux.HandleFunc("GET /api/v1/notifications/silences", h.listSilences)
 	h.mux.HandleFunc("GET /api/v1/notifications/alerts", h.listAlerts)
+	h.mux.HandleFunc("GET /api/v1/instruments", h.listInstruments)
 	return h
 }
 
@@ -161,6 +163,31 @@ func (h *Handler) listSilences(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(silences) //nolint:errcheck
 	h.m.APIRequestRecord("list_silences", "200", time.Since(start))
+}
+
+// listInstruments returns all distinct instrument IDs that have sent data.
+//
+// GET /api/v1/instruments
+func (h *Handler) listInstruments(w http.ResponseWriter, r *http.Request) {
+	start := time.Now()
+	if h.alerts == nil {
+		http.Error(w, "store not configured", http.StatusInternalServerError)
+		h.m.APIRequestRecord("list_instruments", "500", time.Since(start))
+		return
+	}
+	instruments, err := h.alerts.QueryInstruments(r.Context())
+	if err != nil {
+		slog.Error("list instruments failed", "error", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		h.m.APIRequestRecord("list_instruments", "500", time.Since(start))
+		return
+	}
+	if instruments == nil {
+		instruments = []string{}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(instruments) //nolint:errcheck
+	h.m.APIRequestRecord("list_instruments", "200", time.Since(start))
 }
 
 // listAlerts returns grouped helix.error events from the last 7 days.
