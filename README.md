@@ -1,11 +1,11 @@
-# helixobs — gateway
+# helixobs — herald
 
-[![Coverage Status](https://img.shields.io/coveralls/github/HelixObs/gateway/main)](https://coveralls.io/github/HelixObs/gateway?branch=main)
+[![Coverage Status](https://img.shields.io/coveralls/github/HelixObs/herald/main)](https://coveralls.io/github/HelixObs/herald?branch=main)
 
 OTLP interceptor that adds entity-centric intelligence to standard OpenTelemetry spans.
 
-Clients send OTLP gRPC to the gateway on `:4317`. For each span carrying `helix.entity.id`
-the gateway resolves parent provenance, writes to TimescaleDB, dispatches notifications,
+Clients send OTLP gRPC to the herald on `:4317`. For each span carrying `helix.entity.id`
+the herald resolves parent provenance, writes to TimescaleDB, dispatches notifications,
 and forwards the enriched batch to the downstream OTel Collector.
 
 ## Documentation

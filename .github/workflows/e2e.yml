@@ -24,7 +24,7 @@ jobs:
       - name: Run e2e tests
         run: go test -v -tags e2e -timeout 60s ./e2e/
         env:
-          GATEWAY_ADDR: "localhost:4317"
+          HERALD_ADDR: "localhost:4317"
           METRICS_URL:  "http://localhost:2112/metrics"
           TEST_DB_URL:  "postgres://helix:helix@localhost:5432/helixobs"
 

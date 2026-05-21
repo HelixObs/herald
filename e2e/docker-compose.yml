@@ -1,6 +1,6 @@
-name: helixobs-e2e-gateway
+name: helixobs-e2e-herald
 
-# Minimal stack for gateway e2e tests.
+# Minimal stack for herald e2e tests.
 # Expose ports so tests running on the host can reach services.
 
 volumes:
@@ -35,11 +35,11 @@ services:
       - ./otel-collector-config.yml:/etc/otel/config.yml:ro
     networks: [e2e]
 
-  gateway:
+  herald:
     build:
-      context: ../   # gateway repo root
+      context: ../   # herald repo root
     environment:
-      GATEWAY_ADDR:       ":4317"
+      HERALD_ADDR:        ":4317"
       COLLECTOR_ENDPOINT: "otel-collector:4317"
       DB_URL:             "postgres://helix:helix@db:5432/helixobs"
       METRICS_ADDR:       ":2112"

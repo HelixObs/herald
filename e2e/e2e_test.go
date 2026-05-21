@@ -34,7 +34,7 @@ import (
 
 // ── Config from env ───────────────────────────────────────────────────────────
 
-func gatewayAddr() string { return envOr("GATEWAY_ADDR", "localhost:4317") }
+func heraldAddr() string { return envOr("HERALD_ADDR", "localhost:4317") }
 func metricsURL() string  { return envOr("METRICS_URL", "http://localhost:2112/metrics") }
 func apiURL() string      { return envOr("API_URL", "http://localhost:8080") }
 func dbURL() string       { return envOr("TEST_DB_URL", "postgres://helix:helix@localhost:5432/helixobs") }
@@ -215,7 +215,7 @@ func sendHelixSpan(t *testing.T, entityID, instrumentID, stage string, parentIDs
 
 func sendRawSpan(t *testing.T, attrs map[string]string) {
 	t.Helper()
-	conn, err := grpc.NewClient(gatewayAddr(),
+	conn, err := grpc.NewClient(heraldAddr(),
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
 	)
 	if err != nil {

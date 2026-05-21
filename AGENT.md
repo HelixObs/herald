@@ -1,12 +1,12 @@
-# gateway
+# herald
 
-The HelixObs gateway — an OTLP interceptor that adds entity-centric intelligence
+The HelixObs herald — an OTLP interceptor that adds entity-centric intelligence
 to standard OpenTelemetry spans before forwarding them to the OTel Collector.
 
 ## What it does
 
-Clients (helixobs Python/C++ library) send standard OTLP gRPC to the gateway on `:4317`.
-For each span carrying `helix.entity.id` the gateway:
+Clients (helixobs Python/C++ library) send standard OTLP gRPC to the herald on `:4317`.
+For each span carrying `helix.entity.id` the herald:
 
 1. Reads `helix.parent.ids` (all parent entity IDs, comma-separated).
 2. Looks up each parent in the server-side TraceStore → adds OTel span links.
@@ -182,7 +182,7 @@ Silence rules are persisted in `notification_silences` and cached in-process wit
 | `helix_entities_total` | `instrument_id`, `stage`, `status` | Entity spans processed |
 | `helix_spans_received_total` | — | All OTLP spans received |
 | `helix_spans_passthrough_total` | — | Spans forwarded without helix processing |
-| `helix_span_processing_duration_seconds` | `instrument_id` | End-to-end gateway latency |
+| `helix_span_processing_duration_seconds` | `instrument_id` | End-to-end herald latency |
 
 ### Entity events
 | Metric | Labels | Description |
@@ -225,7 +225,7 @@ Silence rules are persisted in `notification_silences` and cached in-process wit
 
 ## Authentication
 
-The gateway issues short-lived HelixObs JWTs (24h, HS256) via `POST /auth/token`.
+The herald issues short-lived HelixObs JWTs (24h, HS256) via `POST /auth/token`.
 Instruments authenticate using a pluggable per-instrument backend configured in the
 instrument YAML `auth:` block.
 
@@ -233,8 +233,8 @@ instrument YAML `auth:` block.
 
 | Backend | YAML `type` | How it works |
 |---|---|---|
-| `secret` | `type: secret` + `api_key_hash: sha256:<hex>` | Client sends registration secret; gateway compares SHA-256 hash |
-| `token_introspection` | `type: token_introspection` + `verify_url: https://...` | Client sends existing JWT; gateway calls remote `/verify` → HTTP 200 = valid |
+| `secret` | `type: secret` + `api_key_hash: sha256:<hex>` | Client sends registration secret; herald compares SHA-256 hash |
+| `token_introspection` | `type: token_introspection` + `verify_url: https://...` | Client sends existing JWT; herald calls remote `/verify` → HTTP 200 = valid |
 
 ### Token exchange flow
 
@@ -255,7 +255,7 @@ old tokens to expire (24h), then removing the old key.
 ### Rollout
 
 Empty `JWT_SECRET` = auth disabled (dev mode, backward compatible). Safe rollout:
-1. Deploy gateway with empty `JWT_SECRET` (no enforcement).
+1. Deploy herald with empty `JWT_SECRET` (no enforcement).
 2. Distribute secrets to pipeline operators.
 3. Pipelines update to call `/auth/token` at startup.
 4. Set `JWT_SECRET` → enforcement begins.
@@ -279,7 +279,7 @@ echo -n "<secret>" | sha256sum
 
 | Variable | Default | Description |
 |---|---|---|
-| `GATEWAY_ADDR` | `:4317` | gRPC listen address (OTLP receiver) |
+| `HERALD_ADDR` | `:4317` | gRPC listen address (OTLP receiver) |
 | `COLLECTOR_ENDPOINT` | `otel-collector:4317` | Downstream OTel Collector |
 | `DB_URL` | `postgres://helix:helix@db:5432/helixobs` | TimescaleDB connection string |
 | `METRICS_ADDR` | `:2112` | Prometheus `/metrics` HTTP endpoint |
