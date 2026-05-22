@@ -353,22 +353,31 @@ func TestEntityOperationsDBError(t *testing.T) {
 	}
 }
 
-// ── monitorPlots ──────────────────────────────────────────────────────────────
+// ── monitorFields ─────────────────────────────────────────────────────────────
 
-func TestMonitorPlots(t *testing.T) {
-	h := api.New(&mockQuerier{}, nil, nil)
+func TestMonitorFieldsMissingInstrument(t *testing.T) {
+	ms := &mockMonitorStore{}
+	h := api.New(&mockQuerier{}, ms, nil)
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/monitor/plots", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/monitor/fields", nil)
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 for missing instrument, got %d", rec.Code)
+	}
+}
+
+func TestMonitorFieldsSuccess(t *testing.T) {
+	ms := &mockMonitorStore{}
+	h := api.New(&mockQuerier{}, ms, nil)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/monitor/fields?instrument=CHIME", nil)
 	h.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Errorf("expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
-	var out []map[string]any
+	var out []string
 	if err := json.NewDecoder(rec.Body).Decode(&out); err != nil {
 		t.Fatalf("decode response: %v", err)
-	}
-	if len(out) == 0 {
-		t.Error("expected at least one plot config in response")
 	}
 }
 
@@ -385,15 +394,14 @@ func TestMonitorBinsMissingParams(t *testing.T) {
 	}
 }
 
-func TestMonitorBinsUnknownPlot(t *testing.T) {
+func TestMonitorBinsInvalidYField(t *testing.T) {
 	h := api.New(&mockQuerier{}, nil, nil)
 	rec := httptest.NewRecorder()
-	// 10-minute window: non-zero from_ms so required-params check passes.
 	req := httptest.NewRequest(http.MethodGet,
-		"/api/v1/monitor/bins?plot=nonexistent&instrument=CHIME&from_ms=1000000&to_ms=1600000", nil)
+		"/api/v1/monitor/bins?y_field=invalid+key!&instrument=CHIME&from_ms=1000000&to_ms=1600000", nil)
 	h.ServeHTTP(rec, req)
-	if rec.Code != http.StatusNotFound {
-		t.Errorf("expected 404 for unknown plot, got %d", rec.Code)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 for invalid y_field, got %d", rec.Code)
 	}
 }
 
@@ -402,7 +410,7 @@ func TestMonitorBinsWindowTooSmall(t *testing.T) {
 	rec := httptest.NewRecorder()
 	// from_ms=1000000, to_ms=1001000 → 1-second window, below the 5-minute minimum.
 	req := httptest.NewRequest(http.MethodGet,
-		"/api/v1/monitor/bins?plot=chime_dm_time&instrument=CHIME&from_ms=1000000&to_ms=1001000", nil)
+		"/api/v1/monitor/bins?y_field=dm&instrument=CHIME&from_ms=1000000&to_ms=1001000", nil)
 	h.ServeHTTP(rec, req)
 	if rec.Code != http.StatusBadRequest {
 		t.Errorf("expected 400 for window too small, got %d", rec.Code)
@@ -414,7 +422,7 @@ func TestMonitorBinsWindowTooLarge(t *testing.T) {
 	rec := httptest.NewRecorder()
 	// from_ms=1000000, to_ms=1000000+90_000_000 → 25-hour window, above the 24-hour max.
 	req := httptest.NewRequest(http.MethodGet,
-		"/api/v1/monitor/bins?plot=chime_dm_time&instrument=CHIME&from_ms=1000000&to_ms=91000000", nil)
+		"/api/v1/monitor/bins?y_field=dm&instrument=CHIME&from_ms=1000000&to_ms=91000000", nil)
 	h.ServeHTTP(rec, req)
 	if rec.Code != http.StatusBadRequest {
 		t.Errorf("expected 400 for window too large, got %d", rec.Code)
@@ -432,6 +440,10 @@ func (m *mockMonitorStore) QueryEntitiesRaw(_ context.Context, _ string, _, _ in
 	return m.rows, m.err
 }
 
+func (m *mockMonitorStore) QueryMetadataKeys(_ context.Context, _ string) ([]string, error) {
+	return []string{}, m.err
+}
+
 // ── monitorBins success + error paths ─────────────────────────────────────────
 
 func TestMonitorBinsNilStore(t *testing.T) {
@@ -439,7 +451,7 @@ func TestMonitorBinsNilStore(t *testing.T) {
 	h := api.New(&mockQuerier{}, nil, &noopMetrics{})
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet,
-		"/api/v1/monitor/bins?plot=chime_dm_time&instrument=CHIME&from_ms=1000000&to_ms=1600000", nil)
+		"/api/v1/monitor/bins?y_field=dm&instrument=CHIME&from_ms=1000000&to_ms=1600000", nil)
 	h.ServeHTTP(rec, req)
 	if rec.Code != http.StatusInternalServerError {
 		t.Errorf("expected 500 for nil monitor store, got %d", rec.Code)
@@ -451,7 +463,7 @@ func TestMonitorBinsStoreError(t *testing.T) {
 	h := api.New(&mockQuerier{}, ms, &noopMetrics{})
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet,
-		"/api/v1/monitor/bins?plot=chime_dm_time&instrument=CHIME&from_ms=1000000&to_ms=1600000", nil)
+		"/api/v1/monitor/bins?y_field=dm&instrument=CHIME&from_ms=1000000&to_ms=1600000", nil)
 	h.ServeHTTP(rec, req)
 	if rec.Code != http.StatusInternalServerError {
 		t.Errorf("expected 500 for store error, got %d", rec.Code)
@@ -463,7 +475,7 @@ func TestMonitorBinsSuccess(t *testing.T) {
 	h := api.New(&mockQuerier{}, ms, &noopMetrics{})
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet,
-		"/api/v1/monitor/bins?plot=chime_dm_time&instrument=CHIME&from_ms=1000000&to_ms=1600000", nil)
+		"/api/v1/monitor/bins?y_field=dm&instrument=CHIME&from_ms=1000000&to_ms=1600000", nil)
 	h.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Errorf("expected 200, got %d: %s", rec.Code, rec.Body.String())
@@ -479,7 +491,7 @@ func TestMonitorBinsSuccessWithYOverrides(t *testing.T) {
 	h := api.New(&mockQuerier{}, ms, nil)
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet,
-		"/api/v1/monitor/bins?plot=chime_dm_time&instrument=CHIME&from_ms=1000000&to_ms=1600000&y_min=100&y_max=5000", nil)
+		"/api/v1/monitor/bins?y_field=dm&instrument=CHIME&from_ms=1000000&to_ms=1600000&y_min=100&y_max=5000", nil)
 	h.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Errorf("expected 200, got %d: %s", rec.Code, rec.Body.String())
@@ -496,7 +508,7 @@ func TestMonitorBinsClampExtremes(t *testing.T) {
 	} {
 		rec := httptest.NewRecorder()
 		req := httptest.NewRequest(http.MethodGet,
-			"/api/v1/monitor/bins?plot=chime_dm_time&instrument=CHIME&from_ms=1000000&to_ms=1600000&"+params, nil)
+			"/api/v1/monitor/bins?y_field=dm&instrument=CHIME&from_ms=1000000&to_ms=1600000&"+params, nil)
 		h.ServeHTTP(rec, req)
 		// nil monitor → 500; the clamp calls happen before this check
 		if rec.Code != http.StatusInternalServerError {
@@ -511,7 +523,7 @@ func TestMonitorBinsParseHelpers(t *testing.T) {
 	// parseInt error: from_ms=bad → defaults to 0 → 400 missing params.
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet,
-		"/api/v1/monitor/bins?plot=chime_dm_time&instrument=CHIME&from_ms=bad&to_ms=1600000", nil)
+		"/api/v1/monitor/bins?y_field=dm&instrument=CHIME&from_ms=bad&to_ms=1600000", nil)
 	h.ServeHTTP(rec, req)
 	if rec.Code != http.StatusBadRequest {
 		t.Errorf("expected 400 for bad from_ms, got %d", rec.Code)
@@ -522,7 +534,7 @@ func TestMonitorBinsParseHelpers(t *testing.T) {
 	h2 := api.New(&mockQuerier{}, ms, nil)
 	rec = httptest.NewRecorder()
 	req = httptest.NewRequest(http.MethodGet,
-		"/api/v1/monitor/bins?plot=chime_dm_time&instrument=CHIME&from_ms=1000000&to_ms=1600000&y_max=notafloat", nil)
+		"/api/v1/monitor/bins?y_field=dm&instrument=CHIME&from_ms=1000000&to_ms=1600000&y_max=notafloat", nil)
 	h2.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Errorf("expected 200 even with unparseable y_max, got %d", rec.Code)

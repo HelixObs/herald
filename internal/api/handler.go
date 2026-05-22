@@ -24,6 +24,7 @@ type Querier interface {
 // MonitorStore is the database interface for the monitor binning API.
 type MonitorStore interface {
 	QueryEntitiesRaw(ctx context.Context, instrument string, fromNs, toNs int64, metaFilter string) ([]db.RawEntityRow, error)
+	QueryMetadataKeys(ctx context.Context, instrument string) ([]string, error)
 }
 
 // SilenceStore is the database interface for silence CRUD.
@@ -62,7 +63,7 @@ func New(d Querier, ms MonitorStore, m apiMetrics) *Handler {
 	h.mux.HandleFunc("GET /api/v1/entity/{entity_id}/graph", h.entityGraph)
 	h.mux.HandleFunc("GET /api/v1/entity/{entity_id}/operations", h.entityOperations)
 	h.mux.HandleFunc("GET /api/v1/monitor/bins", h.monitorBins)
-	h.mux.HandleFunc("GET /api/v1/monitor/plots", h.monitorPlots)
+	h.mux.HandleFunc("GET /api/v1/monitor/fields", h.monitorFields)
 	h.mux.HandleFunc("POST /api/v1/notifications/silence", h.createSilence)
 	h.mux.HandleFunc("DELETE /api/v1/notifications/silence/{id}", h.deleteSilence)
 	h.mux.HandleFunc("GET /api/v1/notifications/silences", h.listSilences)
@@ -307,20 +308,41 @@ func (h *Handler) entityOperations(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// monitorPlots returns all registered plot configs.
+// monitorFields returns distinct metadata keys seen in the last 24 h for an instrument.
 //
-// GET /api/v1/monitor/plots
-func (h *Handler) monitorPlots(w http.ResponseWriter, r *http.Request) {
+// GET /api/v1/monitor/fields?instrument=CHIMEFRB
+func (h *Handler) monitorFields(w http.ResponseWriter, r *http.Request) {
+	instrument := r.URL.Query().Get("instrument")
+	if instrument == "" {
+		http.Error(w, "instrument is required", http.StatusBadRequest)
+		return
+	}
+	if h.monitor == nil {
+		http.Error(w, "monitor store not configured", http.StatusInternalServerError)
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+	keys, err := h.monitor.QueryMetadataKeys(ctx, instrument)
+	if err != nil {
+		slog.Error("monitor fields query failed", "error", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	if keys == nil {
+		keys = []string{}
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Access-Control-Allow-Origin", "*")
-	if err := json.NewEncoder(w).Encode(monitor.AllConfigs()); err != nil {
-		slog.Error("monitor plots encode failed", "error", err)
+	if err := json.NewEncoder(w).Encode(keys); err != nil {
+		slog.Error("monitor fields encode failed", "error", err)
 	}
 }
 
 // monitorBins bins entities into a 2D grid and returns populated cells.
 //
-// GET /api/v1/monitor/bins?plot=chime_dm_time&instrument=CHIME&from_ms=...&to_ms=...&t_bins=1200&y_bins=300&y_max=3000
+// GET /api/v1/monitor/bins?y_field=dm&weight_field=snr&instrument=CHIMEFRB&from_ms=...&to_ms=...
+// &t_bins=1200&y_bins=300&y_min=0&y_max=3000
 func (h *Handler) monitorBins(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 	status := "success"
@@ -331,7 +353,8 @@ func (h *Handler) monitorBins(w http.ResponseWriter, r *http.Request) {
 	}()
 
 	q := r.URL.Query()
-	plotName := q.Get("plot")
+	yField := q.Get("y_field")
+	weightField := q.Get("weight_field")
 	instrument := q.Get("instrument")
 	fromMs := parseInt(q.Get("from_ms"), 0)
 	toMs := parseInt(q.Get("to_ms"), 0)
@@ -339,17 +362,22 @@ func (h *Handler) monitorBins(w http.ResponseWriter, r *http.Request) {
 	yBins := clamp(parseInt(q.Get("y_bins"), 300), 1, 4096)
 	yMin := parseFloat(q.Get("y_min"), -1)
 	yMax := parseFloat(q.Get("y_max"), 0)
+	yMinDefault := parseFloat(q.Get("y_min_default"), 0)
+	yMaxDefault := parseFloat(q.Get("y_max_default"), 1000)
 
-	if plotName == "" || instrument == "" || fromMs == 0 || toMs == 0 {
+	if yField == "" || instrument == "" || fromMs == 0 || toMs == 0 {
 		status = "bad_request"
-		http.Error(w, "plot, instrument, from_ms, to_ms are required", http.StatusBadRequest)
+		http.Error(w, "y_field, instrument, from_ms, to_ms are required", http.StatusBadRequest)
 		return
 	}
-
-	p := monitor.Get(plotName)
-	if p == nil {
-		status = "not_found"
-		http.Error(w, "unknown plot", http.StatusNotFound)
+	if !monitor.ValidateFieldName(yField) {
+		status = "bad_request"
+		http.Error(w, "invalid y_field", http.StatusBadRequest)
+		return
+	}
+	if weightField != "" && !monitor.ValidateFieldName(weightField) {
+		status = "bad_request"
+		http.Error(w, "invalid weight_field", http.StatusBadRequest)
 		return
 	}
 
@@ -367,19 +395,14 @@ func (h *Handler) monitorBins(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	metaFilter, err := monitor.MetadataFilter(p)
-	if err != nil {
-		status = "error"
-		slog.Error("monitor metadata filter error", "plot", plotName, "error", err)
-		http.Error(w, "internal error", http.StatusInternalServerError)
-		return
-	}
-
 	if h.monitor == nil {
 		status = "error"
 		http.Error(w, "monitor store not configured", http.StatusInternalServerError)
 		return
 	}
+
+	// Require the y_field key to exist in metadata — allows TimescaleDB chunk pruning.
+	metaFilter := "metadata ? '" + yField + "'"
 
 	ctx, cancel := context.WithTimeout(r.Context(), 8*time.Second)
 	defer cancel()
@@ -387,36 +410,35 @@ func (h *Handler) monitorBins(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		status = "error"
 		if ctx.Err() != nil {
-			slog.Warn("monitor bins timed out (pool likely saturated)", "plot", plotName)
+			slog.Warn("monitor bins timed out", "y_field", yField)
 			http.Error(w, "service temporarily unavailable", http.StatusServiceUnavailable)
 		} else {
-			slog.Error("monitor bins query failed", "plot", plotName, "error", err)
+			slog.Error("monitor bins query failed", "y_field", yField, "error", err)
 			http.Error(w, "internal error", http.StatusInternalServerError)
 		}
 		return
 	}
 
-	cfg := p.Config()
-	bins, snrMax := monitor.Bin(p, cfg, rows, fromNs, toNs, tBins, yBins, yMin, yMax)
+	bins, weightMax := monitor.Bin(rows, yField, weightField, yMinDefault, yMaxDefault, fromNs, toNs, tBins, yBins, yMin, yMax)
 
-	yMinActual := cfg.YMin
-	if yMin >= 0 && yMin < cfg.YMax {
+	yMinActual := yMinDefault
+	if yMin >= 0 && yMin < yMaxDefault {
 		yMinActual = yMin
 	}
-	yMaxActual := cfg.YMax
+	yMaxActual := yMaxDefault
 	if yMax > yMinActual {
 		yMaxActual = yMax
 	}
 
 	resp := monitor.BinsResponse{
-		Bins:   bins,
-		TBins:  tBins,
-		YBins:  yBins,
-		FromNs: fromNs,
-		ToNs:   toNs,
-		YMin:   yMinActual,
-		YMax:   yMaxActual,
-		SNRMax: snrMax,
+		Bins:      bins,
+		TBins:     tBins,
+		YBins:     yBins,
+		FromNs:    fromNs,
+		ToNs:      toNs,
+		YMin:      yMinActual,
+		YMax:      yMaxActual,
+		WeightMax: weightMax,
 	}
 
 	w.Header().Set("Content-Type", "application/json")

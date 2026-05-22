@@ -1,396 +1,175 @@
 package monitor_test
 
 import (
-	"strings"
 	"testing"
 
 	"github.com/HelixObs/herald/internal/db"
 	"github.com/HelixObs/herald/internal/monitor"
 )
 
-// mockPlugin is a test-local plugin for injection testing.
-type mockPlugin struct {
-	keys []string
-}
+// ── ValidateFieldName ─────────────────────────────────────────────────────────
 
-func (m *mockPlugin) Config() monitor.PlotConfig { return monitor.PlotConfig{} }
-func (m *mockPlugin) RequiredKeys() []string      { return m.keys }
-func (m *mockPlugin) Extract(_ db.RawEntityRow) (float64, float64, bool) {
-	return 0, 0, false
-}
-
-// ── Get ───────────────────────────────────────────────────────────────────────
-
-func TestGetChimeDMTime(t *testing.T) {
-	p := monitor.Get("chime_dm_time")
-	if p == nil {
-		t.Fatal("expected non-nil plugin for chime_dm_time")
+func TestValidateFieldNameValid(t *testing.T) {
+	for _, k := range []string{"dm", "helix.chime.dm", "snr_value", "a1.b2.c3"} {
+		if !monitor.ValidateFieldName(k) {
+			t.Errorf("expected %q to be valid", k)
+		}
 	}
 }
 
-func TestGetChimeBeamTime(t *testing.T) {
-	p := monitor.Get("chime_beam_time")
-	if p == nil {
-		t.Fatal("expected non-nil plugin for chime_beam_time")
+func TestValidateFieldNameInvalid(t *testing.T) {
+	for _, k := range []string{"", "has space", "CamelCase", "key;DROP", "k/v"} {
+		if monitor.ValidateFieldName(k) {
+			t.Errorf("expected %q to be invalid", k)
+		}
 	}
 }
 
-func TestGetNonexistent(t *testing.T) {
-	p := monitor.Get("nonexistent_plugin")
-	if p != nil {
-		t.Errorf("expected nil for unknown plugin, got %v", p)
+// ── helpers ───────────────────────────────────────────────────────────────────
+
+func row(id string, ts int64, meta map[string]string) db.RawEntityRow {
+	return db.RawEntityRow{ID: id, TimestampNs: ts, Metadata: meta}
+}
+
+const (
+	fromNs = int64(0)
+	toNs   = int64(10 * 60 * 1_000_000_000) // 10 minutes
+)
+
+// ── Bin — basic ───────────────────────────────────────────────────────────────
+
+func TestBinEmptyRows(t *testing.T) {
+	bins, wMax := monitor.Bin(nil, "dm", "", 0, 3000, fromNs, toNs, 100, 100, -1, 0)
+	if len(bins) != 0 {
+		t.Errorf("expected 0 bins for nil rows, got %d", len(bins))
+	}
+	if wMax != 0 {
+		t.Errorf("expected weightMax=0, got %v", wMax)
 	}
 }
 
-// ── AllConfigs ────────────────────────────────────────────────────────────────
-
-func TestAllConfigsAtLeastTwo(t *testing.T) {
-	cfgs := monitor.AllConfigs()
-	if len(cfgs) < 2 {
-		t.Errorf("expected >= 2 registered configs, got %d", len(cfgs))
-	}
-}
-
-// ── MetadataFilter ────────────────────────────────────────────────────────────
-
-func TestMetadataFilterDMPlot(t *testing.T) {
-	p := monitor.Get("chime_dm_time")
-	if p == nil {
-		t.Fatal("chime_dm_time plugin not registered")
-	}
-	filter, err := monitor.MetadataFilter(p)
-	if err != nil {
-		t.Fatalf("MetadataFilter error: %v", err)
-	}
-	if !strings.Contains(filter, "metadata ? 'helix.chime.dm'") {
-		t.Errorf("expected filter to contain metadata ? 'helix.chime.dm', got: %q", filter)
-	}
-	if !strings.Contains(filter, "metadata ? 'helix.chime.snr'") {
-		t.Errorf("expected filter to contain metadata ? 'helix.chime.snr', got: %q", filter)
-	}
-}
-
-func TestMetadataFilterInvalidKeyReturnsError(t *testing.T) {
-	// Keys with invalid characters should cause an error.
-	p := &mockPlugin{keys: []string{"valid.key", "invalid key; DROP TABLE"}}
-	_, err := monitor.MetadataFilter(p)
-	if err == nil {
-		t.Error("expected error for invalid key name, got nil")
-	}
-}
-
-func TestMetadataFilterNoKeys(t *testing.T) {
-	p := &mockPlugin{keys: []string{}}
-	filter, err := monitor.MetadataFilter(p)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if filter != "" {
-		t.Errorf("expected empty filter for no keys, got %q", filter)
-	}
-}
-
-// ── Bin ───────────────────────────────────────────────────────────────────────
-
-func makeDMRow(id string, ts int64, dm, snr string) db.RawEntityRow {
-	return db.RawEntityRow{
-		ID:          id,
-		TimestampNs: ts,
-		Metadata:    map[string]string{"helix.chime.dm": dm, "helix.chime.snr": snr},
-	}
-}
-
-func TestBinMatchingRows(t *testing.T) {
-	p := monitor.Get("chime_dm_time")
-	if p == nil {
-		t.Fatal("chime_dm_time plugin not registered")
-	}
-	cfg := p.Config()
-
-	fromNs := int64(1_000_000_000)
-	toNs := int64(1_000_000_000 + 10*60*1_000_000_000) // 10 minutes later
-
+func TestBinMissingYField(t *testing.T) {
 	rows := []db.RawEntityRow{
-		makeDMRow("entity-1", fromNs+int64(1*60*1_000_000_000), "341.2", "18.3"),
-		makeDMRow("entity-2", fromNs+int64(5*60*1_000_000_000), "100.0", "12.5"),
+		row("e1", toNs/2, map[string]string{"other": "42"}),
 	}
-
-	bins, snrMax := monitor.Bin(p, cfg, rows, fromNs, toNs, 100, 100, -1, 0)
-	if len(bins) == 0 {
-		t.Error("expected non-empty bins for matching rows")
-	}
-	if snrMax <= 0 {
-		t.Errorf("expected SNRMax > 0, got %v", snrMax)
+	bins, _ := monitor.Bin(rows, "dm", "", 0, 3000, fromNs, toNs, 100, 100, -1, 0)
+	if len(bins) != 0 {
+		t.Errorf("expected 0 bins when y_field absent, got %d", len(bins))
 	}
 }
 
 func TestBinOutOfYRange(t *testing.T) {
-	p := monitor.Get("chime_dm_time")
-	if p == nil {
-		t.Fatal("chime_dm_time plugin not registered")
-	}
-	cfg := p.Config() // YMin=0, YMax=3000
-
-	fromNs := int64(1_000_000_000)
-	toNs := fromNs + int64(10*60*1_000_000_000)
-
-	// DM value way above YMax=3000
 	rows := []db.RawEntityRow{
-		makeDMRow("entity-oob", fromNs+int64(1*60*1_000_000_000), "99999.0", "18.3"),
+		row("e1", toNs/2, map[string]string{"dm": "99999"}),
 	}
-
-	bins, snrMax := monitor.Bin(p, cfg, rows, fromNs, toNs, 100, 100, -1, 0)
+	bins, _ := monitor.Bin(rows, "dm", "", 0, 3000, fromNs, toNs, 100, 100, -1, 0)
 	if len(bins) != 0 {
-		t.Errorf("expected empty bins for out-of-range y, got %d bins", len(bins))
-	}
-	if snrMax != 0 {
-		t.Errorf("expected SNRMax=0 for empty result, got %v", snrMax)
+		t.Errorf("expected 0 bins for y outside range, got %d", len(bins))
 	}
 }
 
-func TestBinEmptyRows(t *testing.T) {
-	p := monitor.Get("chime_dm_time")
-	if p == nil {
-		t.Fatal("chime_dm_time plugin not registered")
+func TestBinMatchingRowsUniformWeight(t *testing.T) {
+	rows := []db.RawEntityRow{
+		row("e1", toNs/4, map[string]string{"dm": "341.2"}),
+		row("e2", toNs/2, map[string]string{"dm": "100.0"}),
 	}
-	cfg := p.Config()
-
-	fromNs := int64(1_000_000_000)
-	toNs := fromNs + int64(10*60*1_000_000_000)
-
-	bins, snrMax := monitor.Bin(p, cfg, nil, fromNs, toNs, 100, 100, -1, 0)
-	if len(bins) != 0 {
-		t.Errorf("expected empty bins for no rows, got %d", len(bins))
+	bins, wMax := monitor.Bin(rows, "dm", "", 0, 3000, fromNs, toNs, 100, 100, -1, 0)
+	if len(bins) == 0 {
+		t.Error("expected non-empty bins")
 	}
-	if snrMax != 0 {
-		t.Errorf("expected SNRMax=0 for no rows, got %v", snrMax)
+	// Uniform weight defaults to 1.0
+	if wMax != 1.0 {
+		t.Errorf("expected weightMax=1.0 for uniform weight, got %v", wMax)
 	}
 }
+
+func TestBinMatchingRowsWithWeight(t *testing.T) {
+	rows := []db.RawEntityRow{
+		row("e1", toNs/4, map[string]string{"dm": "341.2", "snr": "18.3"}),
+		row("e2", toNs/2, map[string]string{"dm": "100.0", "snr": "12.5"}),
+	}
+	bins, wMax := monitor.Bin(rows, "dm", "snr", 0, 3000, fromNs, toNs, 100, 100, -1, 0)
+	if len(bins) == 0 {
+		t.Error("expected non-empty bins")
+	}
+	if wMax != 18.3 {
+		t.Errorf("expected weightMax=18.3, got %v", wMax)
+	}
+}
+
+func TestBinMissingWeightFieldDefaultsToOne(t *testing.T) {
+	// weight_field set but absent from metadata → weight defaults to 1.
+	rows := []db.RawEntityRow{
+		row("e1", toNs/2, map[string]string{"dm": "500.0"}),
+	}
+	bins, wMax := monitor.Bin(rows, "dm", "snr", 0, 3000, fromNs, toNs, 100, 100, -1, 0)
+	if len(bins) == 0 {
+		t.Error("expected non-empty bins even when weight field absent")
+	}
+	if wMax != 1.0 {
+		t.Errorf("expected weightMax=1.0 fallback, got %v", wMax)
+	}
+}
+
+// ── Bin — best-candidate selection per cell ───────────────────────────────────
+
+func TestBinBestCandidatePerCell(t *testing.T) {
+	// Two rows land in the same bin; the higher-weight one should win.
+	midTs := toNs / 2
+	rows := []db.RawEntityRow{
+		row("low", midTs, map[string]string{"dm": "500.0", "snr": "5.0"}),
+		row("high", midTs+1, map[string]string{"dm": "500.1", "snr": "20.0"}),
+	}
+	bins, _ := monitor.Bin(rows, "dm", "snr", 0, 3000, fromNs, toNs, 10, 10, -1, 0)
+	for _, b := range bins {
+		if b.ID == "low" {
+			t.Error("low-weight candidate should have been evicted by high-weight candidate")
+		}
+	}
+}
+
+// ── Bin — y-axis overrides ────────────────────────────────────────────────────
 
 func TestBinYMaxOverride(t *testing.T) {
-	p := monitor.Get("chime_dm_time")
-	if p == nil {
-		t.Fatal("chime_dm_time plugin not registered")
-	}
-	cfg := p.Config() // default YMax=3000
-
-	fromNs := int64(1_000_000_000)
-	toNs := fromNs + int64(10*60*1_000_000_000)
-
-	// DM=500, within override yMax=600 but would be out of default yMax=3000 range still OK
 	rows := []db.RawEntityRow{
-		makeDMRow("entity-ymax", fromNs+int64(1*60*1_000_000_000), "500.0", "20.0"),
+		row("e1", toNs/2, map[string]string{"dm": "500.0"}),
 	}
-
-	// yMaxOverride=600 means effective range is [0, 600]
-	bins, snrMax := monitor.Bin(p, cfg, rows, fromNs, toNs, 100, 100, -1, 600)
+	// yMaxOverride=600 → effective [0, 600]; dm=500 should fit
+	bins, _ := monitor.Bin(rows, "dm", "", 0, 3000, fromNs, toNs, 100, 100, -1, 600)
 	if len(bins) == 0 {
 		t.Error("expected non-empty bins with yMaxOverride=600 and dm=500")
 	}
-	if snrMax != 20.0 {
-		t.Errorf("expected SNRMax=20.0, got %v", snrMax)
+}
+
+func TestBinYMinOverride(t *testing.T) {
+	rows := []db.RawEntityRow{
+		row("e1", toNs/2, map[string]string{"dm": "50.0"}),
+	}
+	// yMinOverride=100 → effective [100, 3000]; dm=50 is now below range
+	bins, _ := monitor.Bin(rows, "dm", "", 0, 3000, fromNs, toNs, 100, 100, 100, 0)
+	if len(bins) != 0 {
+		t.Errorf("expected 0 bins with yMinOverride=100 and dm=50, got %d", len(bins))
 	}
 }
 
-// ── chimeDMPlot Extract ───────────────────────────────────────────────────────
+// ── Bin — meta payload ────────────────────────────────────────────────────────
 
-func TestChimeDMExtractValid(t *testing.T) {
-	p := monitor.Get("chime_dm_time")
-	if p == nil {
-		t.Fatal("chime_dm_time plugin not registered")
+func TestBinMetaContainsYAndWeightFields(t *testing.T) {
+	rows := []db.RawEntityRow{
+		row("e1", toNs/2, map[string]string{"dm": "341.2", "snr": "18.3", "extra": "ignored"}),
 	}
-	row := db.RawEntityRow{
-		ID:          "e1",
-		TimestampNs: 1000,
-		Metadata: map[string]string{
-			"helix.chime.dm":  "341.2",
-			"helix.chime.snr": "18.3",
-		},
+	bins, _ := monitor.Bin(rows, "dm", "snr", 0, 3000, fromNs, toNs, 100, 100, -1, 0)
+	if len(bins) == 0 {
+		t.Fatal("expected non-empty bins")
 	}
-	y, snr, ok := p.Extract(row)
-	if !ok {
-		t.Fatal("expected ok=true")
+	b := bins[0]
+	if b.Meta["dm"] != "341.2" {
+		t.Errorf("expected meta[dm]=341.2, got %q", b.Meta["dm"])
 	}
-	if y != 341.2 {
-		t.Errorf("expected y=341.2, got %v", y)
+	if b.Meta["snr"] != "18.3" {
+		t.Errorf("expected meta[snr]=18.3, got %q", b.Meta["snr"])
 	}
-	if snr != 18.3 {
-		t.Errorf("expected snr=18.3, got %v", snr)
-	}
-}
-
-func TestChimeDMExtractMissingKeys(t *testing.T) {
-	p := monitor.Get("chime_dm_time")
-	if p == nil {
-		t.Fatal("chime_dm_time plugin not registered")
-	}
-	row := db.RawEntityRow{
-		ID:          "e2",
-		TimestampNs: 1000,
-		Metadata:    map[string]string{"helix.chime.dm": "341.2"}, // missing snr
-	}
-	_, _, ok := p.Extract(row)
-	if ok {
-		t.Error("expected ok=false for missing snr key")
-	}
-}
-
-func TestChimeDMExtractUnparseableFloat(t *testing.T) {
-	p := monitor.Get("chime_dm_time")
-	if p == nil {
-		t.Fatal("chime_dm_time plugin not registered")
-	}
-	row := db.RawEntityRow{
-		ID:          "e3",
-		TimestampNs: 1000,
-		Metadata: map[string]string{
-			"helix.chime.dm":  "not-a-float",
-			"helix.chime.snr": "18.3",
-		},
-	}
-	_, _, ok := p.Extract(row)
-	if ok {
-		t.Error("expected ok=false for unparseable dm float")
-	}
-}
-
-// ── chimeBeamPlot Extract ─────────────────────────────────────────────────────
-
-func TestChimeBeamExtractValid(t *testing.T) {
-	p := monitor.Get("chime_beam_time")
-	if p == nil {
-		t.Fatal("chime_beam_time plugin not registered")
-	}
-	// beam_no=1024 → 1024 % 1000 = 24
-	row := db.RawEntityRow{
-		ID:          "e4",
-		TimestampNs: 1000,
-		Metadata: map[string]string{
-			"helix.chime.beam_no": "1024",
-			"helix.chime.snr":     "18.3",
-		},
-	}
-	y, snr, ok := p.Extract(row)
-	if !ok {
-		t.Fatal("expected ok=true")
-	}
-	if y != 24 {
-		t.Errorf("expected y=24 (1024%%1000), got %v", y)
-	}
-	if snr != 18.3 {
-		t.Errorf("expected snr=18.3, got %v", snr)
-	}
-}
-
-func TestChimeBeamExtractMissingKeys(t *testing.T) {
-	p := monitor.Get("chime_beam_time")
-	if p == nil {
-		t.Fatal("chime_beam_time plugin not registered")
-	}
-	row := db.RawEntityRow{
-		ID:          "e5",
-		TimestampNs: 1000,
-		Metadata:    map[string]string{"helix.chime.beam_no": "1024"}, // missing snr
-	}
-	_, _, ok := p.Extract(row)
-	if ok {
-		t.Error("expected ok=false for missing snr key")
-	}
-}
-
-func TestChimeBeamExtractUnparseableInt(t *testing.T) {
-	p := monitor.Get("chime_beam_time")
-	if p == nil {
-		t.Fatal("chime_beam_time plugin not registered")
-	}
-	row := db.RawEntityRow{
-		ID:          "e6",
-		TimestampNs: 1000,
-		Metadata: map[string]string{
-			"helix.chime.beam_no": "not-an-int",
-			"helix.chime.snr":     "18.3",
-		},
-	}
-	_, _, ok := p.Extract(row)
-	if ok {
-		t.Error("expected ok=false for unparseable beam_no int")
-	}
-}
-
-// ── Config and RequiredKeys ───────────────────────────────────────────────────
-
-func TestChimeDMConfig(t *testing.T) {
-	p := monitor.Get("chime_dm_time")
-	if p == nil {
-		t.Fatal("chime_dm_time plugin not registered")
-	}
-	cfg := p.Config()
-	if cfg.Name != "chime_dm_time" {
-		t.Errorf("expected name=chime_dm_time, got %q", cfg.Name)
-	}
-	if cfg.YMin != 0 {
-		t.Errorf("expected YMin=0, got %v", cfg.YMin)
-	}
-	if cfg.YMax != 3000 {
-		t.Errorf("expected YMax=3000, got %v", cfg.YMax)
-	}
-}
-
-func TestChimeDMRequiredKeys(t *testing.T) {
-	p := monitor.Get("chime_dm_time")
-	if p == nil {
-		t.Fatal("chime_dm_time plugin not registered")
-	}
-	keys := p.RequiredKeys()
-	if len(keys) != 2 {
-		t.Fatalf("expected 2 required keys, got %d", len(keys))
-	}
-	keySet := map[string]bool{}
-	for _, k := range keys {
-		keySet[k] = true
-	}
-	if !keySet["helix.chime.dm"] {
-		t.Error("expected helix.chime.dm in required keys")
-	}
-	if !keySet["helix.chime.snr"] {
-		t.Error("expected helix.chime.snr in required keys")
-	}
-}
-
-func TestChimeBeamConfig(t *testing.T) {
-	p := monitor.Get("chime_beam_time")
-	if p == nil {
-		t.Fatal("chime_beam_time plugin not registered")
-	}
-	cfg := p.Config()
-	if cfg.Name != "chime_beam_time" {
-		t.Errorf("expected name=chime_beam_time, got %q", cfg.Name)
-	}
-	if cfg.YMin != 0 {
-		t.Errorf("expected YMin=0, got %v", cfg.YMin)
-	}
-	if cfg.YMax != 255 {
-		t.Errorf("expected YMax=255, got %v", cfg.YMax)
-	}
-}
-
-func TestChimeBeamRequiredKeys(t *testing.T) {
-	p := monitor.Get("chime_beam_time")
-	if p == nil {
-		t.Fatal("chime_beam_time plugin not registered")
-	}
-	keys := p.RequiredKeys()
-	if len(keys) != 2 {
-		t.Fatalf("expected 2 required keys, got %d", len(keys))
-	}
-	keySet := map[string]bool{}
-	for _, k := range keys {
-		keySet[k] = true
-	}
-	if !keySet["helix.chime.beam_no"] {
-		t.Error("expected helix.chime.beam_no in required keys")
-	}
-	if !keySet["helix.chime.snr"] {
-		t.Error("expected helix.chime.snr in required keys")
+	if _, ok := b.Meta["extra"]; ok {
+		t.Error("extra field should not appear in meta")
 	}
 }
