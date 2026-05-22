@@ -111,11 +111,10 @@ func Bin(rows []db.RawEntityRow, yField, weightField string, yMinDefault, yMaxDe
 
 		idx := tBin*yBins + yBin
 		if weight > grid[idx].weight {
-			meta := map[string]string{yField: yStr}
-			if weightField != "" {
-				if wStr, wok := row.Metadata[weightField]; wok {
-					meta[weightField] = wStr
-				}
+			// Include all helix.* attributes so the hover tooltip is fully informative.
+			meta := make(map[string]string, len(row.Metadata))
+			for k, v := range row.Metadata {
+				meta[k] = v
 			}
 			grid[idx] = binCell{weight: weight, id: row.ID, ts: row.TimestampNs, yVal: y, meta: meta}
 		}

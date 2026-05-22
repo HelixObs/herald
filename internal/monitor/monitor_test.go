@@ -154,9 +154,9 @@ func TestBinYMinOverride(t *testing.T) {
 
 // ── Bin — meta payload ────────────────────────────────────────────────────────
 
-func TestBinMetaContainsYAndWeightFields(t *testing.T) {
+func TestBinMetaContainsAllFields(t *testing.T) {
 	rows := []db.RawEntityRow{
-		row("e1", toNs/2, map[string]string{"dm": "341.2", "snr": "18.3", "extra": "ignored"}),
+		row("e1", toNs/2, map[string]string{"dm": "341.2", "snr": "18.3", "stage": "search"}),
 	}
 	bins, _ := monitor.Bin(rows, "dm", "snr", 0, 3000, fromNs, toNs, 100, 100, -1, 0)
 	if len(bins) == 0 {
@@ -169,7 +169,7 @@ func TestBinMetaContainsYAndWeightFields(t *testing.T) {
 	if b.Meta["snr"] != "18.3" {
 		t.Errorf("expected meta[snr]=18.3, got %q", b.Meta["snr"])
 	}
-	if _, ok := b.Meta["extra"]; ok {
-		t.Error("extra field should not appear in meta")
+	if b.Meta["stage"] != "search" {
+		t.Errorf("expected meta[stage]=search (all fields included for tooltip), got %q", b.Meta["stage"])
 	}
 }
