@@ -414,14 +414,20 @@ func (s *Store) QueryEntitiesRaw(ctx context.Context, instrument string, fromNs,
 	return result, nil
 }
 
-// QueryMetadataKeys returns distinct top-level keys present in the metadata JSONB column
-// for entities belonging to instrument within the last 24 hours. Up to 200 keys are returned.
+// QueryMetadataKeys returns distinct metadata keys whose values look numeric (integer or
+// float, including scientific notation) across a 1000-row sample of recent entities for
+// the given instrument. String-only fields (stage, event category, etc.) are excluded.
 func (s *Store) QueryMetadataKeys(ctx context.Context, instrument string) ([]string, error) {
-	q := `SELECT DISTINCT jsonb_object_keys(metadata)
-		FROM entities
-		WHERE instrument_id = $1
-		  AND created_at > now() - interval '24 hours'
-		ORDER BY 1
+	q := `SELECT DISTINCT kv.key
+		FROM (
+		  SELECT metadata
+		  FROM entities
+		  WHERE instrument_id = $1
+		    AND created_at > now() - interval '24 hours'
+		  LIMIT 1000
+		) AS e, jsonb_each_text(e.metadata) AS kv
+		WHERE kv.value ~ '^-?[0-9]+\.?[0-9]*([eE][+-]?[0-9]+)?$'
+		ORDER BY kv.key
 		LIMIT 200`
 	start := time.Now()
 	rows, err := s.pool.Query(ctx, q, instrument)
