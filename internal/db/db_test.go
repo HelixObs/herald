@@ -82,6 +82,68 @@ func TestWriteEntityIdempotent(t *testing.T) {
 	}
 }
 
+func TestWriteEntityEventDeduplicatesRepeats(t *testing.T) {
+	store, err := db.New(context.Background(), dbURL(t), nil)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer store.Close()
+
+	entityID := "test-event-dedup-entity"
+	_ = store.WriteEntity(context.Background(), db.Entity{
+		ID: entityID, InstrumentID: "TEST", TimestampNs: 1,
+	})
+
+	// Simulate a pipeliner retrying the same failure 5 times with different trace IDs.
+	for i := range 5 {
+		ev := db.EntityEvent{
+			InstrumentID: "TEST",
+			EntityID:     entityID,
+			TraceID:      fmt.Sprintf("trace%013d", i),
+			EventName:    "helix.error",
+			TimestampNs:  int64(i + 1),
+			Metadata:     map[string]string{"message": fmt.Sprintf("file not found: /data/path/entity%d", i)},
+		}
+		if err := store.WriteEntityEvent(context.Background(), ev); err != nil {
+			t.Fatalf("WriteEntityEvent %d: %v", i, err)
+		}
+	}
+
+	pool, err := pgxpool.New(context.Background(), dbURL(t))
+	if err != nil {
+		t.Fatalf("pool: %v", err)
+	}
+	defer pool.Close()
+
+	// All 5 retries normalise to the same message — only 1 row in entity_events.
+	var eventCount int
+	if err := pool.QueryRow(context.Background(),
+		`SELECT COUNT(*) FROM entity_events WHERE entity_id = $1 AND event_name = 'helix.error'`,
+		entityID,
+	).Scan(&eventCount); err != nil {
+		t.Fatalf("count entity_events: %v", err)
+	}
+	if eventCount != 1 {
+		t.Errorf("expected 1 row in entity_events after 5 identical errors, got %d", eventCount)
+	}
+
+	// entity_event_dedup must show occurrence_count=5 and normalised message.
+	var occurrenceCount int
+	var normMsg string
+	if err := pool.QueryRow(context.Background(),
+		`SELECT occurrence_count, normalised_message FROM entity_event_dedup WHERE entity_id = $1 AND event_name = 'helix.error'`,
+		entityID,
+	).Scan(&occurrenceCount, &normMsg); err != nil {
+		t.Fatalf("query entity_event_dedup: %v", err)
+	}
+	if occurrenceCount != 5 {
+		t.Errorf("expected occurrence_count=5, got %d", occurrenceCount)
+	}
+	if normMsg != "file not found: ?" {
+		t.Errorf("unexpected normalised_message: %q", normMsg)
+	}
+}
+
 func TestWriteEntityEventRoundTrip(t *testing.T) {
 	store, err := db.New(context.Background(), dbURL(t), nil)
 	if err != nil {

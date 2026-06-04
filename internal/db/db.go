@@ -693,19 +693,19 @@ func (s *Store) QueryAlerts(ctx context.Context, instrumentID string) ([]AlertRo
 
 	start := time.Now()
 	rows, err := s.pool.Query(ctx, `
-		WITH errors AS (
-			SELECT entity_id, metadata, created_at, md5(metadata::text) AS grp
-			FROM entity_events
-			WHERE instrument_id = $1
-			  AND event_name = 'helix.error'
-			  AND created_at > now() - INTERVAL '7 days'
-		)
-		SELECT grp, metadata, COUNT(*) AS occurrence_count,
-		       MIN(created_at) AS first_seen, MAX(created_at) AS last_seen,
-		       COALESCE((array_agg(entity_id ORDER BY created_at DESC))[1:5], '{}') AS entity_ids
-		FROM errors
-		GROUP BY grp, metadata
-		ORDER BY last_seen DESC
+		SELECT
+			md5(normalised_message) AS grp,
+			(array_agg(metadata ORDER BY last_seen_at DESC))[1] AS metadata,
+			SUM(occurrence_count) AS occurrence_count,
+			MIN(first_seen_at) AS first_seen,
+			MAX(last_seen_at) AS last_seen,
+			COALESCE((array_agg(entity_id ORDER BY last_seen_at DESC))[1:5], '{}') AS entity_ids
+		FROM entity_event_dedup
+		WHERE instrument_id = $1
+		  AND event_name = 'helix.error'
+		  AND last_seen_at > now() - INTERVAL '7 days'
+		GROUP BY normalised_message
+		ORDER BY MAX(last_seen_at) DESC
 		LIMIT 50`,
 		instrumentID,
 	)
@@ -796,12 +796,43 @@ func alertSilenced(silences []Silence, eventType, fp string) bool {
 	return false
 }
 
-// WriteEntityEvent inserts one entity_event row.
+// WriteEntityEvent deduplicates and persists one helix.* span event.
+// The normalised message (volatile tokens stripped) forms the dedup key together
+// with entity_id and event_name. On first occurrence both entity_event_dedup and
+// entity_events are written; subsequent identical events only increment
+// occurrence_count and refresh last_seen_at in entity_event_dedup.
 func (s *Store) WriteEntityEvent(ctx context.Context, ev EntityEvent) error {
 	meta, err := json.Marshal(ev.Metadata)
 	if err != nil {
 		return fmt.Errorf("marshal metadata: %w", err)
 	}
+
+	msg := ev.Metadata["message"]
+	if msg == "" {
+		msg = ev.Metadata["exception.message"]
+	}
+	normMsg := fingerprint.Normalise(msg)
+
+	var isNew bool
+	err = s.pool.QueryRow(ctx, `
+		INSERT INTO entity_event_dedup
+			(entity_id, instrument_id, event_name, normalised_message, trace_id, metadata)
+		VALUES ($1, $2, $3, $4, $5, $6)
+		ON CONFLICT (entity_id, event_name, normalised_message) DO UPDATE
+			SET occurrence_count = entity_event_dedup.occurrence_count + 1,
+			    last_seen_at     = now(),
+			    trace_id         = EXCLUDED.trace_id,
+			    metadata         = EXCLUDED.metadata
+		RETURNING (xmax = 0)`,
+		ev.EntityID, ev.InstrumentID, ev.EventName, normMsg, ev.TraceID, meta,
+	).Scan(&isNew)
+	if err != nil {
+		return fmt.Errorf("upsert event dedup: %w", err)
+	}
+	if !isNew {
+		return nil
+	}
+
 	start := time.Now()
 	_, err = s.pool.Exec(ctx, `
 		INSERT INTO entity_events
