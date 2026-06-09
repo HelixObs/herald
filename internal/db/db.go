@@ -163,26 +163,30 @@ func (s *Store) QueryEntityGraph(ctx context.Context, entityID string, maxDepth 
 			UNION
 			SELECT e.id, e.instrument_id, e.trace_id, e.timestamp_ns, e.parent_ids, e.metadata, a.depth + 1
 			FROM entities e
-			INNER JOIN ancestors a ON e.id = ANY(a.parent_ids)
+			-- cardinality guard: skip recursive join entirely when parent_ids is empty
+			INNER JOIN ancestors a ON cardinality(a.parent_ids) > 0 AND e.id = ANY(a.parent_ids)
 			WHERE a.depth < $2
 		),
-		descendants(id, instrument_id, trace_id, timestamp_ns, parent_ids, metadata, depth) AS (
-			SELECT id, instrument_id, trace_id, timestamp_ns, parent_ids, metadata, 0
-			FROM (
-				SELECT DISTINCT ON (id)
-					id, instrument_id, trace_id, timestamp_ns, parent_ids, metadata
+		-- Descendants use explicit 2-hop CTEs + LATERAL so the GIN index on
+		-- parent_ids is applied per-ID rather than inside a recursive join
+		-- (PostgreSQL cannot use GIN indexes within recursive CTE joins).
+		-- No DISTINCT ON / ORDER BY here — those force a SkipScan that bypasses
+		-- the GIN index. Duplicates are deduplicated by the Go nodeMap.
+		children AS (
+			SELECT id, instrument_id, trace_id, timestamp_ns, parent_ids, metadata
+			FROM entities
+			WHERE parent_ids @> ARRAY[$1::text]
+			LIMIT 200
+		),
+		grandchildren AS (
+			SELECT e.id, e.instrument_id, e.trace_id, e.timestamp_ns, e.parent_ids, e.metadata
+			FROM children c
+			CROSS JOIN LATERAL (
+				SELECT id, instrument_id, trace_id, timestamp_ns, parent_ids, metadata
 				FROM entities
-				WHERE id = $1
-				ORDER BY id,
-					array_length(parent_ids, 1) DESC NULLS LAST,
-					trace_id NULLS LAST,
-					created_at ASC
-			) t
-			UNION
-			SELECT e.id, e.instrument_id, e.trace_id, e.timestamp_ns, e.parent_ids, e.metadata, d.depth + 1
-			FROM entities e
-			INNER JOIN descendants d ON e.parent_ids @> ARRAY[d.id]
-			WHERE d.depth < 2
+				WHERE parent_ids @> ARRAY[c.id]
+				LIMIT 50
+			) e
 		)
 		SELECT
 			c.id,
@@ -196,11 +200,11 @@ func (s *Store) QueryEntityGraph(ctx context.Context, entityID string, maxDepth 
 				WHERE ee.entity_id = c.id AND ee.event_name = 'helix.error'
 			) AS has_error
 		FROM (
-			SELECT id, instrument_id, trace_id, timestamp_ns, parent_ids, metadata
-			FROM ancestors
+			SELECT id, instrument_id, trace_id, timestamp_ns, parent_ids, metadata FROM ancestors
 			UNION
-			SELECT id, instrument_id, trace_id, timestamp_ns, parent_ids, metadata
-			FROM descendants
+			SELECT id, instrument_id, trace_id, timestamp_ns, parent_ids, metadata FROM children
+			UNION
+			SELECT id, instrument_id, trace_id, timestamp_ns, parent_ids, metadata FROM grandchildren
 		) c
 		LIMIT 500`,
 		entityID, maxDepth,
