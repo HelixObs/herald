@@ -245,7 +245,9 @@ func (h *Handler) entityGraph(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	graph, err := h.db.QueryEntityGraph(r.Context(), entityID, 10)
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+	graph, err := h.db.QueryEntityGraph(ctx, entityID, 10)
 	if err != nil {
 		status = "error"
 		slog.Error("entity graph query failed", "entity_id", entityID, "error", err)
