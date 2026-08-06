@@ -123,6 +123,25 @@ Two interfaces in `internal/notifier/backends.go`:
 Register backends in `main.go` via `n.RegisterMessaging(name, backend)` / `n.RegisterSCM(name, backend)`.
 New backends (Discord, GitLab, etc.) only need to implement the interface — no changes to core notifier logic.
 
+### Notification links
+
+Two different "Inspect Entity" links are built in `dispatch()` (`internal/notifier/notifier.go`), on purpose:
+
+- **Messaging backends** (Slack's "Inspect Entity" button) get a deep link straight into the
+  `helix-entity-inspector` Grafana dashboard (`deploy/grafana/dashboards/entity_inspector.json`),
+  pinned to `var-entity_id` **and** `var-active_trace_id`. The trace ID is the trace of the span
+  that actually emitted the event — not the entity's own creation trace, which is the dashboard's
+  default `active_trace_id` value and can point at the wrong trace for errors raised during a
+  later operation (operations get their own OTel trace; see "Entity operations" above).
+- **SCM backends** (GitHub issue body/comments) keep the plain `{UI_BASE_URL}/entity/{id}` link,
+  since issue bodies also list historical entities (`InspectorBase`) that have no trace context
+  readily available at render time.
+
+`notifier.Event.TraceID` (hex-encoded, set in `interceptor.go` from the erroring span's own
+`TraceId`) and `notifier.Event.Operation` (the span's `Name` — i.e. which operation failed) both
+flow from the interceptor into `notifier.Message`, and `Operation` is rendered as a Slack Block
+Kit field alongside Entity ID / Instrument.
+
 ### Config format (`instruments/*.yml`)
 
 ```yaml

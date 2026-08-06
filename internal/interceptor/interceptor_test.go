@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -17,6 +18,8 @@ import (
 	"github.com/HelixObs/herald/internal/interceptor"
 	"github.com/HelixObs/herald/internal/metrics"
 	"github.com/HelixObs/herald/internal/notifier"
+	"github.com/HelixObs/herald/internal/notifier/config"
+	"github.com/HelixObs/herald/internal/notifier/silence"
 	"github.com/HelixObs/herald/internal/store"
 )
 
@@ -671,4 +674,119 @@ func TestInterceptorMultipleUnknownParents(t *testing.T) {
 	})))
 
 	time.Sleep(300 * time.Millisecond)
+}
+
+// stubMessagingBackend records the last Message it was asked to send.
+type stubMessagingBackend struct {
+	mu   sync.Mutex
+	msgs []notifier.Message
+}
+
+func (s *stubMessagingBackend) Send(_ context.Context, _, _ string, msg notifier.Message, _, _ int) (bool, error) {
+	s.mu.Lock()
+	s.msgs = append(s.msgs, msg)
+	s.mu.Unlock()
+	return true, nil
+}
+
+func (s *stubMessagingBackend) FlushDigests(_ context.Context, _ string, _ int) {}
+
+func (s *stubMessagingBackend) count() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.msgs)
+}
+
+func (s *stubMessagingBackend) last() notifier.Message {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.msgs[len(s.msgs)-1]
+}
+
+// TestInterceptorNotifierCarriesTraceIDAndOperation is an end-to-end check that
+// a helix.error span event flows all the way from the OTLP span through the
+// interceptor into a dispatched notifier.Message with the operation (span name)
+// and the trace ID of the span that actually emitted the error — not just the
+// entity's own creation trace.
+func TestInterceptorNotifierCarriesTraceIDAndOperation(t *testing.T) {
+	dbURL := os.Getenv("TEST_DB_URL")
+	if dbURL == "" {
+		t.Skip("TEST_DB_URL not set")
+	}
+	dbStore, err := db.New(context.Background(), dbURL, nil)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer dbStore.Close()
+
+	reg := prometheus.NewRegistry()
+	m := metrics.New(reg)
+	s := store.New(10_000, m)
+	icp := interceptor.New(s, dbStore, m)
+
+	instID := fmt.Sprintf("ICPNOTIF%d", time.Now().UnixNano())
+	dir := t.TempDir()
+	yaml := fmt.Sprintf(`
+instrument_id: %s
+notifications:
+  slack_webhook_env: ICPNOTIF_WEBHOOK
+  events:
+    helix.error:
+      slack:
+        channel: "#alerts"
+        sample_window_seconds: 60
+        max_per_window: 5
+`, instID)
+	if err := os.WriteFile(dir+"/inst.yml", []byte(yaml), 0o600); err != nil {
+		t.Fatalf("write yaml: %v", err)
+	}
+	t.Setenv("ICPNOTIF_WEBHOOK", "https://hooks.slack.com/test")
+
+	cfgLoader := config.New(dir, 0, 0)
+	cfgLoader.Start(context.Background(), time.Hour)
+
+	sl := silence.New(dbStore, time.Minute)
+	stub := &stubMessagingBackend{}
+	n := notifier.New(cfgLoader, sl, m, 100, "http://ui", "http://grafana")
+	n.RegisterMessaging("slack", stub)
+	icp.WithNotifier(n)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go n.Start(ctx)
+
+	entityID := fmt.Sprintf("icp-notif-entity-%d", time.Now().UnixNano())
+	span := makeSpan("hdf5-conversion", map[string]string{
+		"helix.entity.id":     entityID,
+		"helix.instrument.id": instID,
+	})
+	span.Events = []*tracepb.Span_Event{
+		{
+			Name:         "helix.error",
+			TimeUnixNano: 1_000_000_000,
+			Attributes:   []*commonpb.KeyValue{strAttr("message", "disk full")},
+		},
+	}
+	icp.Process(makeReq(span))
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) && stub.count() == 0 {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if stub.count() == 0 {
+		t.Fatal("expected a message to be dispatched within timeout")
+	}
+
+	msg := stub.last()
+	if msg.Operation != "hdf5-conversion" {
+		t.Errorf("expected Operation=hdf5-conversion, got %q", msg.Operation)
+	}
+	// makeSpan uses a fixed TraceId of bytes 1..16.
+	const wantTraceID = "0102030405060708090a0b0c0d0e0f10"
+	if !strings.Contains(msg.InspectorURL, "var-active_trace_id="+wantTraceID) {
+		t.Errorf("expected InspectorURL to contain trace ID %q, got %q", wantTraceID, msg.InspectorURL)
+	}
+	if !strings.Contains(msg.InspectorURL, "var-entity_id="+entityID) {
+		t.Errorf("expected InspectorURL to contain entity ID %q, got %q", entityID, msg.InspectorURL)
+	}
 }

@@ -110,6 +110,14 @@ func buildDigestBlockKit(suppressed, windowSecs int, fp string, last notifier.Me
 		fpShort = fp[:8]
 	}
 
+	fields := []any{
+		map[string]any{"type": "mrkdwn", "text": fmt.Sprintf(":id:  *Entity*\n`%s`", last.EntityID)},
+		map[string]any{"type": "mrkdwn", "text": fmt.Sprintf(":telescope:  *Instrument*\n%s", last.InstrumentID)},
+	}
+	if last.Operation != "" {
+		fields = append(fields, map[string]any{"type": "mrkdwn", "text": fmt.Sprintf(":gear:  *Operation*\n`%s`", last.Operation)})
+	}
+
 	elements := []any{
 		map[string]any{
 			"type":  "button",
@@ -145,11 +153,8 @@ func buildDigestBlockKit(suppressed, windowSecs int, fp string, last notifier.Me
 			"text": map[string]any{"type": "mrkdwn", "text": mainText},
 		},
 		map[string]any{
-			"type": "section",
-			"fields": []any{
-				map[string]any{"type": "mrkdwn", "text": fmt.Sprintf(":id:  *Entity*\n`%s`", last.EntityID)},
-				map[string]any{"type": "mrkdwn", "text": fmt.Sprintf(":telescope:  *Instrument*\n%s", last.InstrumentID)},
-			},
+			"type":   "section",
+			"fields": fields,
 		},
 		map[string]any{"type": "actions", "elements": elements},
 		map[string]any{
@@ -175,7 +180,7 @@ func (c *Client) sendBlocks(ctx context.Context, webhookURL, fingerprint string,
 // Layout:
 //   - Header: ":rotating_light: [INST] event.name"
 //   - Section: bold error body + stage/metadata fields inline
-//   - Fields: Entity ID + Instrument
+//   - Fields: Entity ID + Instrument (+ Operation, if known)
 //   - Actions: Inspect Entity (primary), Error Dashboard
 //   - Context: GitHub issue link(s) + fingerprint short + HelixObs tag
 func buildBlockKit(fp string, msg notifier.Message) []byte {
@@ -218,6 +223,14 @@ func buildBlockKit(fp string, msg notifier.Message) []byte {
 	ctxParts = append(ctxParts, fmt.Sprintf("Fingerprint: `%s`", fpShort))
 	ctxParts = append(ctxParts, "HelixObs")
 
+	fields := []any{
+		map[string]any{"type": "mrkdwn", "text": fmt.Sprintf(":id:  *Entity*\n`%s`", msg.EntityID)},
+		map[string]any{"type": "mrkdwn", "text": fmt.Sprintf(":telescope:  *Instrument*\n%s", msg.InstrumentID)},
+	}
+	if msg.Operation != "" {
+		fields = append(fields, map[string]any{"type": "mrkdwn", "text": fmt.Sprintf(":gear:  *Operation*\n`%s`", msg.Operation)})
+	}
+
 	actionElements := []any{
 		map[string]any{
 			"type":  "button",
@@ -249,11 +262,8 @@ func buildBlockKit(fp string, msg notifier.Message) []byte {
 			"text": map[string]any{"type": "mrkdwn", "text": mainText},
 		},
 		map[string]any{
-			"type": "section",
-			"fields": []any{
-				map[string]any{"type": "mrkdwn", "text": fmt.Sprintf(":id:  *Entity*\n`%s`", msg.EntityID)},
-				map[string]any{"type": "mrkdwn", "text": fmt.Sprintf(":telescope:  *Instrument*\n%s", msg.InstrumentID)},
-			},
+			"type":   "section",
+			"fields": fields,
 		},
 		map[string]any{
 			"type":     "actions",

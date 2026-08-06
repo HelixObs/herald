@@ -208,8 +208,10 @@ func (icp *Interceptor) processSpan(span *tracepb.Span) {
 				EntityID:     ev.EntityID,
 				EventName:    ev.EventName,
 				Stage:        ev.Metadata["stage"],
+				Operation:    span.Name,
 				Message:      coalesceMetadata(ev.Metadata, "message", "exception.message"),
 				TimestampNs:  ev.TimestampNs,
+				TraceID:      ev.TraceID,
 				Metadata:     ev.Metadata,
 			})
 		}

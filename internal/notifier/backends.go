@@ -14,6 +14,7 @@ type Message struct {
 	EntityID         string
 	Body             string            // human-readable error/event message
 	Stage            string
+	Operation        string            // name of the span that emitted this event
 	InspectorURL     string
 	ErrDashURL       string
 	NotificationsURL string            // deep-link to the Notifications page for this fingerprint
