@@ -77,14 +77,22 @@ type stubSCM struct {
 	mu         sync.Mutex
 	dispatches int
 	returnURL  string // URL to return from Dispatch (empty string → no URL)
+	lastParams notifier.SCMParams
 }
 
-func (s *stubSCM) Dispatch(_ context.Context, _ notifier.SCMParams) (string, error) {
+func (s *stubSCM) Dispatch(_ context.Context, p notifier.SCMParams) (string, error) {
 	s.mu.Lock()
 	s.dispatches++
+	s.lastParams = p
 	u := s.returnURL
 	s.mu.Unlock()
 	return u, nil
+}
+
+func (s *stubSCM) last() notifier.SCMParams {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.lastParams
 }
 
 // yamlLoader creates a config.Loader backed by a temp dir with the given YAML.
@@ -417,6 +425,148 @@ notifications:
 	// "process" key should appear in Text.
 	if !strings.Contains(msg.Text, "process") {
 		t.Errorf("expected Text to contain process metadata, got:\n%s", msg.Text)
+	}
+}
+
+// TestBuildMessage_InspectorURLIsGrafanaEntityInspector verifies that messaging
+// backends receive a deep-link into the Grafana entity-inspector dashboard,
+// pinned to the trace that actually emitted the event — not just the entity's
+// own creation trace, which can be a different trace for errors raised during
+// a later operation.
+func TestBuildMessage_InspectorURLIsGrafanaEntityInspector(t *testing.T) {
+	t.Setenv("GRAF_SLACK_WEBHOOK", "https://hooks.slack.com/test")
+	cfg := yamlLoader(t, `
+instrument_id: GRAF
+notifications:
+  slack_webhook_env: GRAF_SLACK_WEBHOOK
+  events:
+    helix.error:
+      slack:
+        channel: "#alerts"
+        sample_window_seconds: 60
+        max_per_window: 5
+`)
+	sl := silence.New(noopSilenceDB{}, time.Minute)
+	stub := &stubMessaging{}
+	n := notifier.New(cfg, sl, newTestMetrics(), 10, "http://ui", "https://grafana.chimefrb.xyz")
+	n.RegisterMessaging("slack", stub)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go n.Start(ctx)
+
+	n.Send(notifier.Event{
+		InstrumentID: "GRAF",
+		EventName:    "helix.error",
+		EntityID:     "1172460443",
+		Message:      "disk full",
+		TraceID:      "301be60b5f905291a2f513c038189c5c",
+	})
+
+	waitFor(t, 500*time.Millisecond, func() bool { return stub.count() == 1 })
+	msg := stub.last()
+
+	const want = "https://grafana.chimefrb.xyz/d/helix-entity-inspector/entity-inspector" +
+		"?orgId=1&from=now-1h&to=now&timezone=browser" +
+		"&var-entity_id=1172460443&var-active_trace_id=301be60b5f905291a2f513c038189c5c"
+	if msg.InspectorURL != want {
+		t.Errorf("expected InspectorURL=%q, got %q", want, msg.InspectorURL)
+	}
+}
+
+// TestBuildMessage_OperationPropagated verifies the operation name (the OTel
+// span name that emitted the event) flows from Event through to Message, so
+// backends can show which operation failed, not just which entity.
+func TestBuildMessage_OperationPropagated(t *testing.T) {
+	t.Setenv("OP_SLACK_WEBHOOK", "https://hooks.slack.com/test")
+	cfg := yamlLoader(t, `
+instrument_id: OP
+notifications:
+  slack_webhook_env: OP_SLACK_WEBHOOK
+  events:
+    helix.error:
+      slack:
+        channel: "#alerts"
+        sample_window_seconds: 60
+        max_per_window: 5
+`)
+	sl := silence.New(noopSilenceDB{}, time.Minute)
+	stub := &stubMessaging{}
+	n := notifier.New(cfg, sl, newTestMetrics(), 10, "http://ui", "http://grafana")
+	n.RegisterMessaging("slack", stub)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go n.Start(ctx)
+
+	n.Send(notifier.Event{
+		InstrumentID: "OP",
+		EventName:    "helix.error",
+		EntityID:     "ent-9",
+		Message:      "conversion failed",
+		Operation:    "hdf5-conversion",
+	})
+
+	waitFor(t, 500*time.Millisecond, func() bool { return stub.count() == 1 })
+	msg := stub.last()
+
+	if msg.Operation != "hdf5-conversion" {
+		t.Errorf("expected Operation=hdf5-conversion, got %q", msg.Operation)
+	}
+	if !strings.Contains(msg.Text, "Operation: hdf5-conversion") {
+		t.Errorf("expected Text to contain operation line, got:\n%s", msg.Text)
+	}
+}
+
+// TestDispatch_SCMKeepsUIInspectorURL verifies that SCM backends (GitHub, etc.)
+// still receive the UI's own entity page — the Grafana deep-link swap applies
+// only to messaging backends (Slack "Inspect Entity" button).
+func TestDispatch_SCMKeepsUIInspectorURL(t *testing.T) {
+	t.Setenv("SCMURL_SLACK_WEBHOOK", "https://hooks.slack.com/test")
+	t.Setenv("SCMURL_GITHUB_TOKEN", "tok")
+	cfg := yamlLoader(t, `
+instrument_id: SCMURL
+notifications:
+  slack_webhook_env: SCMURL_SLACK_WEBHOOK
+  github_token_env: SCMURL_GITHUB_TOKEN
+  events:
+    helix.error:
+      slack:
+        channel: "#alerts"
+        sample_window_seconds: 60
+        max_per_window: 5
+      github:
+        repo: org/repo
+`)
+	sl := silence.New(noopSilenceDB{}, time.Minute)
+	msgStub := &stubMessaging{}
+	scmStub := &stubSCM{returnURL: "https://github.com/org/repo/issues/1"}
+	n := notifier.New(cfg, sl, newTestMetrics(), 10, "http://ui", "http://grafana")
+	n.RegisterMessaging("slack", msgStub)
+	n.RegisterSCM("github", scmStub)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go n.Start(ctx)
+
+	n.Send(notifier.Event{
+		InstrumentID: "SCMURL",
+		EventName:    "helix.error",
+		EntityID:     "ent-42",
+		Message:      "disk full",
+		TraceID:      "abc123",
+	})
+
+	waitFor(t, 500*time.Millisecond, func() bool { return msgStub.count() == 1 })
+	params := scmStub.last()
+
+	if params.InspectorURL != "http://ui/entity/ent-42" {
+		t.Errorf("expected SCM InspectorURL=http://ui/entity/ent-42, got %q", params.InspectorURL)
+	}
+
+	msg := msgStub.last()
+	if !strings.Contains(msg.InspectorURL, "grafana") || !strings.Contains(msg.InspectorURL, "ent-42") {
+		t.Errorf("expected messaging InspectorURL to be a grafana link containing entity ID, got %q", msg.InspectorURL)
 	}
 }
 

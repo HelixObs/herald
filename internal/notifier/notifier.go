@@ -34,8 +34,10 @@ type Event struct {
 	EntityID     string
 	EventName    string
 	Stage        string
+	Operation    string // name of the span that emitted this event — the operation that failed
 	Message      string
 	TimestampNs  int64
+	TraceID      string // hex-encoded trace ID of the span that emitted this event
 	Metadata     map[string]string
 }
 
@@ -142,6 +144,13 @@ func (n *Notifier) dispatch(ctx context.Context, e Event) {
 	}
 
 	inspectorURL := fmt.Sprintf("%s/entity/%s", n.uiBase, e.EntityID)
+	// Deep-links straight into the failing trace (not just the entity's own creation
+	// trace, which entity-inspector defaults to and which can be a different trace
+	// entirely for errors raised during a later operation).
+	grafanaInspectorURL := fmt.Sprintf(
+		"%s/d/helix-entity-inspector/entity-inspector?orgId=1&from=now-1h&to=now&timezone=browser&var-entity_id=%s&var-active_trace_id=%s",
+		n.grafana, url.QueryEscape(e.EntityID), url.QueryEscape(e.TraceID),
+	)
 	errEntitiesURL := fmt.Sprintf("%s/d/helix-error-entities", n.grafana)
 	notificationsURL := fmt.Sprintf("%s/notifications?instrument_id=%s&fingerprint=%s",
 		n.uiBase, url.QueryEscape(e.InstrumentID), fp)
@@ -195,7 +204,7 @@ func (n *Notifier) dispatch(ctx context.Context, e Event) {
 		case sem <- struct{}{}:
 			go func() {
 				defer func() { <-sem }()
-				n.doMessaging(ctx, e, mc, backend, fp, inspectorURL, errEntitiesURL, notificationsURL, issueURLs)
+				n.doMessaging(ctx, e, mc, backend, fp, grafanaInspectorURL, errEntitiesURL, notificationsURL, issueURLs)
 			}()
 		default:
 			n.metrics.NotificationChannelDropsTotal.Inc()
@@ -307,6 +316,7 @@ func (n *Notifier) buildMsg(e Event, messageTemplate, inspectorURL, errEntitiesU
 		EntityID:         e.EntityID,
 		Body:             e.Message,
 		Stage:            e.Stage,
+		Operation:        e.Operation,
 		InspectorURL:     inspectorURL,
 		ErrDashURL:       errEntitiesURL,
 		NotificationsURL: notificationsURL,
@@ -356,6 +366,9 @@ func (n *Notifier) buildText(e Event, messageTemplate, inspectorURL, errEntities
 		if len(pairs) > 0 {
 			fmt.Fprintf(&sb, "\n%s", strings.Join(pairs, " · "))
 		}
+	}
+	if e.Operation != "" {
+		fmt.Fprintf(&sb, "\nOperation: %s", e.Operation)
 	}
 	fmt.Fprintf(&sb, "\nEntity: %s\n🔍 Inspect: %s\n📊 Error Entities: %s",
 		e.EntityID, inspectorURL, errEntitiesURL)

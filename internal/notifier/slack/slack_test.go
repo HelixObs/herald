@@ -257,3 +257,49 @@ func TestSend_IssueURLInContext(t *testing.T) {
 		t.Errorf("expected Block Kit JSON to contain GitHub issue URL, got:\n%s", string(body))
 	}
 }
+
+func TestSend_OperationInBlockKit(t *testing.T) {
+	var body []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		buf := make([]byte, r.ContentLength)
+		r.Body.Read(buf) //nolint:errcheck
+		body = buf
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	c := slack.New()
+	m := notifier.Message{
+		Text:         "conversion failed",
+		Body:         "conversion failed",
+		InstrumentID: "CHIMEFRB",
+		EventName:    "helix.error",
+		EntityID:     "frb-2025-002",
+		Operation:    "hdf5-conversion",
+		InspectorURL: "http://grafana/d/helix-entity-inspector/entity-inspector?var-entity_id=frb-2025-002",
+		ErrDashURL:   "http://grafana/d/helix-error-entities",
+	}
+	c.Send(context.Background(), srv.URL, "deadbeef", m, 60, 5) //nolint:errcheck
+
+	if !strings.Contains(string(body), "hdf5-conversion") {
+		t.Errorf("expected Block Kit JSON to contain operation name, got:\n%s", string(body))
+	}
+}
+
+func TestSend_NoOperationOmitsField(t *testing.T) {
+	var body []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		buf := make([]byte, r.ContentLength)
+		r.Body.Read(buf) //nolint:errcheck
+		body = buf
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	c := slack.New()
+	c.Send(context.Background(), srv.URL, "deadbeef", msg("hello"), 60, 5) //nolint:errcheck
+
+	if strings.Contains(string(body), "Operation") {
+		t.Errorf("expected no Operation field when unset, got:\n%s", string(body))
+	}
+}
