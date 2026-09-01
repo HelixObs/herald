@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -27,8 +28,9 @@ import (
 	"github.com/HelixObs/herald/internal/notifier"
 	notifiercfg "github.com/HelixObs/herald/internal/notifier/config"
 	ghbackend "github.com/HelixObs/herald/internal/notifier/github"
-	slackbackend "github.com/HelixObs/herald/internal/notifier/slack"
 	"github.com/HelixObs/herald/internal/notifier/silence"
+	slackbackend "github.com/HelixObs/herald/internal/notifier/slack"
+	"github.com/HelixObs/herald/internal/platformcheck"
 	"github.com/HelixObs/herald/internal/receiver"
 	"github.com/HelixObs/herald/internal/store"
 )
@@ -104,6 +106,26 @@ func run() error {
 		return fmt.Errorf("init receiver: %w", err)
 	}
 
+	// ── Platform health check ───────────────────────────────────────────
+	// Sends a synthetic canary through the same paths real clients use (a
+	// trace through Herald's own receiver, a log direct to the collector),
+	// then checks Loki/Tempo for both. Metrics-only for now — see
+	// internal/platformcheck for why alerting is a deliberate later step.
+	checker, err := platformcheck.Dial(platformcheck.Config{
+		Interval:          time.Duration(cfg.platformCheckIntervalSecs) * time.Second,
+		LookbackWindow:    time.Duration(cfg.platformCheckLookbackSecs) * time.Second,
+		PropagationDelay:  15 * time.Second,
+		LokiURL:           cfg.lokiURL,
+		LokiTenant:        cfg.lokiTenant,
+		TempoURL:          cfg.tempoURL,
+		CollectorEndpoint: cfg.collectorEndpoint,
+	}, recv, m)
+	if err != nil {
+		return fmt.Errorf("init platform checker: %w", err)
+	}
+	defer checker.Close() //nolint:errcheck
+	go checker.Start(ctx)
+
 	// ── gRPC server ───────────────────────────────────────────────────
 	// UnaryInterceptor validates Bearer tokens on gRPC calls when auth is enabled.
 	grpcSrv := grpc.NewServer(grpc.UnaryInterceptor(auth.UnaryInterceptor(issuer)))
@@ -148,8 +170,8 @@ func run() error {
 	case <-ctx.Done():
 		slog.Info("shutting down...")
 		grpcSrv.GracefulStop()
-		promSrv.Shutdown(context.Background())  //nolint:errcheck
-		apiSrv.Shutdown(context.Background())   //nolint:errcheck
+		promSrv.Shutdown(context.Background()) //nolint:errcheck
+		apiSrv.Shutdown(context.Background())  //nolint:errcheck
 		return nil
 	case err := <-errCh:
 		return fmt.Errorf("grpc serve: %w", err)
@@ -177,6 +199,13 @@ type config struct {
 	notifierChannelBuffer       int
 	uiBaseURL                   string
 	grafanaURL                  string
+
+	// Platform health check
+	platformCheckIntervalSecs int
+	platformCheckLookbackSecs int
+	lokiURL                   string
+	lokiTenant                string
+	tempoURL                  string
 }
 
 func configFromEnv() config {
@@ -197,6 +226,12 @@ func configFromEnv() config {
 		notifierChannelBuffer:       1000,
 		uiBaseURL:                   envOr("UI_BASE_URL", "http://localhost:8081"),
 		grafanaURL:                  envOr("GRAFANA_URL", "http://localhost:3001"),
+
+		platformCheckIntervalSecs: envOrInt("PLATFORM_CHECK_INTERVAL_SECS", 300),
+		platformCheckLookbackSecs: envOrInt("PLATFORM_CHECK_LOOKBACK_SECS", 900),
+		lokiURL:                   envOr("LOKI_QUERY_URL", "http://loki-gateway.loki.svc.cluster.local"),
+		lokiTenant:                envOr("LOKI_TENANT", "anonymous"),
+		tempoURL:                  envOr("TEMPO_QUERY_URL", "http://tempo-gateway.tempo.svc.cluster.local"),
 	}
 }
 
@@ -205,4 +240,17 @@ func envOr(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+func envOrInt(key string, fallback int) int {
+	v := os.Getenv(key)
+	if v == "" {
+		return fallback
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil {
+		slog.Warn("invalid int env var, using default", "key", key, "value", v, "default", fallback)
+		return fallback
+	}
+	return n
 }

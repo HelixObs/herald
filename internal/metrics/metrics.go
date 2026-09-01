@@ -124,6 +124,38 @@ type Metrics struct {
 
 	// NotificationConfigReloadErrorsTotal counts config reload validation failures.
 	NotificationConfigReloadErrorsTotal *prometheus.CounterVec
+
+	// ── Platform health check ───────────────────────────────────────────────
+
+	// PlatformCheckResultCount is the raw count returned by the Loki/Tempo
+	// query each tick (Loki result-stream count, Tempo trace count) for the
+	// given source and signal, before it's collapsed into a presence boolean.
+	// Kept alongside PlatformCheckPresence specifically so the presence
+	// threshold (currently "count > 0") isn't baked irreversibly into what
+	// the dashboard can see — it can be recomputed at any cutoff directly
+	// from this metric while alerting thresholds are still being calibrated.
+	PlatformCheckResultCount *prometheus.GaugeVec
+
+	// PlatformCheckPresence is 1 if the given signal (traces or logs) was
+	// observed for the given source (the "canary" synthetic identity, or a
+	// real watched service_name) within the last check window, 0 otherwise.
+	// This is the primary dashboard signal — plotted as a state timeline it
+	// shows exactly the kind of gap that went unnoticed for three days in the
+	// incident this was built for, but per-signal instead of only in
+	// aggregate, so a traces-present/logs-absent split is visible directly.
+	PlatformCheckPresence *prometheus.GaugeVec
+
+	// PlatformCheckLastSuccessTimestamp is the Unix time (seconds) of the last
+	// tick where both the canary trace and canary log were confirmed present.
+	// A staircase that stops climbing is itself a signal the checker (or its
+	// path to Loki/Tempo) is broken, independent of any Slack notification.
+	PlatformCheckLastSuccessTimestamp prometheus.Gauge
+
+	// PlatformCheckMismatchTotal counts trace-vs-log presence mismatches found
+	// for watched real services, by service name and which side was missing.
+	// A real instrument down for maintenance silences both sides equally and
+	// never increments this; only a pipeline-specific break does.
+	PlatformCheckMismatchTotal *prometheus.CounterVec
 }
 
 // New registers all metrics with reg and returns a Metrics instance.
@@ -297,6 +329,26 @@ func New(reg prometheus.Registerer) *Metrics {
 			Name: "helix_notification_config_reload_errors_total",
 			Help: "Instrument notification config reload validation failures.",
 		}, []string{"instrument_id"}),
+
+		PlatformCheckResultCount: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "helix_platform_check_result_count",
+			Help: "Raw Loki result-stream / Tempo trace count for the source (canary or a watched service_name) and signal (traces/logs) in the last check window, before being collapsed into presence.",
+		}, []string{"signal_source", "signal_type"}),
+
+		PlatformCheckPresence: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "helix_platform_check_presence",
+			Help: "1 if the signal (traces/logs) was observed for the source (canary or a watched service_name) in the last check window, else 0.",
+		}, []string{"signal_source", "signal_type"}),
+
+		PlatformCheckLastSuccessTimestamp: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "helix_platform_check_last_success_timestamp_seconds",
+			Help: "Unix time of the last platform check tick where the canary trace and log were both confirmed present.",
+		}),
+
+		PlatformCheckMismatchTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "helix_platform_check_mismatch_total",
+			Help: "Trace-vs-log presence mismatches found for watched services (traces flowing but not logs, or vice versa).",
+		}, []string{"service_name", "missing_side"}),
 	}
 
 	reg.MustRegister(
@@ -310,6 +362,10 @@ func New(reg prometheus.Registerer) *Metrics {
 		m.NotificationChannelDropsTotal,
 		m.NotificationSilencesActive,
 		m.NotificationConfigReloadErrorsTotal,
+		m.PlatformCheckResultCount,
+		m.PlatformCheckPresence,
+		m.PlatformCheckLastSuccessTimestamp,
+		m.PlatformCheckMismatchTotal,
 		m.SpansReceivedTotal,
 		m.SpansPassthroughTotal,
 		m.SpanProcessingDuration,
@@ -340,11 +396,13 @@ func New(reg prometheus.Registerer) *Metrics {
 // These satisfy the storeMetrics and dbMetrics interfaces in their respective
 // packages without creating import cycles.
 
-func (m *Metrics) TraceStoreHit()                        { m.TraceStoreHitsTotal.Inc() }
-func (m *Metrics) TraceStoreMiss()                       { m.TraceStoreMissesTotal.Inc() }
-func (m *Metrics) TraceStoreEviction()                   { m.TraceStoreEvictionsTotal.Inc() }
-func (m *Metrics) TraceStoreSetSize(n int)               { m.TraceStoreSize.Set(float64(n)) }
-func (m *Metrics) RecordTraceStoreLookup(d time.Duration) { m.TraceStoreLookupDuration.Observe(d.Seconds()) }
+func (m *Metrics) TraceStoreHit()          { m.TraceStoreHitsTotal.Inc() }
+func (m *Metrics) TraceStoreMiss()         { m.TraceStoreMissesTotal.Inc() }
+func (m *Metrics) TraceStoreEviction()     { m.TraceStoreEvictionsTotal.Inc() }
+func (m *Metrics) TraceStoreSetSize(n int) { m.TraceStoreSize.Set(float64(n)) }
+func (m *Metrics) RecordTraceStoreLookup(d time.Duration) {
+	m.TraceStoreLookupDuration.Observe(d.Seconds())
+}
 
 func (m *Metrics) DBWriteRecord(table, status string, dur time.Duration) {
 	m.DBWritesTotal.WithLabelValues(table, status).Inc()
