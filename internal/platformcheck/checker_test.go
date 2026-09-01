@@ -128,9 +128,18 @@ func lokiFake(t *testing.T, counts map[string]int, activeNames []string) *httpte
 // /api/v2/search/tag/resource.service.name/values (returning activeNames,
 // for discovery). Pass activeNames as nil for tests that don't exercise
 // discovery.
+//
+// Rejects requests missing X-Scope-OrgID with 401, mirroring the real
+// multi-tenant Tempo — every Tempo query returned 401 in production for 12
+// hours because the checker never set this header. Any test config that
+// forgets TempoTenant will fail loudly here instead of silently.
 func tempoFake(t *testing.T, counts map[string]int, activeNames []string) *httptest.Server {
 	t.Helper()
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("X-Scope-OrgID") == "" {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
 		case "/api/search":
@@ -292,7 +301,7 @@ func TestRecordPresence_SetsRawCountAndDerivedPresence(t *testing.T) {
 	tempo := tempoFake(t, map[string]int{"svc-a": 0}, nil)
 	defer tempo.Close()
 
-	cfg := Config{LokiURL: loki.URL, TempoURL: tempo.URL, LokiTenant: "anonymous"}
+	cfg := Config{LokiURL: loki.URL, TempoURL: tempo.URL, LokiTenant: "anonymous", TempoTenant: "anonymous"}
 	c, m := newTestChecker(t, cfg, &mockTraces{}, &mockLogs{})
 
 	now := time.Now()
@@ -365,6 +374,7 @@ func TestRunOnce_FlagsMismatchOnlyWhenAsymmetric(t *testing.T) {
 		LokiURL:          loki.URL,
 		TempoURL:         tempo.URL,
 		LokiTenant:       "anonymous",
+		TempoTenant:      "anonymous",
 		LookbackWindow:   time.Hour,
 		PropagationDelay: time.Millisecond,
 	}
@@ -402,6 +412,7 @@ func TestRunOnce_CanaryPartialPresenceDoesNotAdvanceSuccessTimestamp(t *testing.
 		LokiURL:          loki.URL,
 		TempoURL:         tempo.URL,
 		LokiTenant:       "anonymous",
+		TempoTenant:      "anonymous",
 		LookbackWindow:   time.Hour,
 		PropagationDelay: time.Millisecond,
 	}
@@ -438,6 +449,7 @@ func TestRunOnce_ReproducesLabelPromotionIncidentSignature(t *testing.T) {
 		LokiURL:          loki.URL,
 		TempoURL:         tempo.URL,
 		LokiTenant:       "anonymous",
+		TempoTenant:      "anonymous",
 		LookbackWindow:   time.Hour,
 		PropagationDelay: time.Millisecond,
 	}

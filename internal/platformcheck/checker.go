@@ -93,6 +93,10 @@ type Config struct {
 	LokiURL    string // e.g. http://loki-gateway.loki.svc.cluster.local
 	LokiTenant string // X-Scope-OrgID, e.g. "anonymous"
 	TempoURL   string // e.g. http://tempo-gateway.tempo.svc.cluster.local
+	// TempoTenant is the X-Scope-OrgID header Tempo requires, same as Loki —
+	// Tempo is multi-tenant too. Every Tempo query returned 401 for 12 hours
+	// in production before this field existed; don't remove it.
+	TempoTenant string // X-Scope-OrgID, e.g. "anonymous"
 
 	// CollectorEndpoint is the otel-collector's OTLP gRPC address, used to
 	// send the canary log directly — the same path real clients' LOGS_ENDPOINT
@@ -439,6 +443,9 @@ func (c *Checker) tempoTraceCount(ctx context.Context, serviceName string, start
 	if err != nil {
 		return 0, err
 	}
+	if c.cfg.TempoTenant != "" {
+		req.Header.Set("X-Scope-OrgID", c.cfg.TempoTenant)
+	}
 	resp, err := c.http.Do(req)
 	if err != nil {
 		return 0, err
@@ -501,6 +508,9 @@ func (c *Checker) tempoActiveServiceNames(ctx context.Context, start, end time.T
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
 	if err != nil {
 		return nil, err
+	}
+	if c.cfg.TempoTenant != "" {
+		req.Header.Set("X-Scope-OrgID", c.cfg.TempoTenant)
 	}
 	resp, err := c.http.Do(req)
 	if err != nil {

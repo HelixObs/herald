@@ -118,6 +118,7 @@ func run() error {
 		LokiURL:           cfg.lokiURL,
 		LokiTenant:        cfg.lokiTenant,
 		TempoURL:          cfg.tempoURL,
+		TempoTenant:       cfg.tempoTenant,
 		CollectorEndpoint: cfg.collectorEndpoint,
 	}, recv, m)
 	if err != nil {
@@ -206,6 +207,7 @@ type config struct {
 	lokiURL                   string
 	lokiTenant                string
 	tempoURL                  string
+	tempoTenant               string
 }
 
 func configFromEnv() config {
@@ -231,6 +233,7 @@ func configFromEnv() config {
 		platformCheckLookbackSecs: envOrInt("PLATFORM_CHECK_LOOKBACK_SECS", 900),
 		lokiURL:                   envOr("LOKI_QUERY_URL", "http://loki-gateway.loki.svc.cluster.local"),
 		lokiTenant:                envOr("LOKI_TENANT", "anonymous"),
+		tempoTenant:               envOr("TEMPO_TENANT", "anonymous"),
 		tempoURL:                  envOr("TEMPO_QUERY_URL", "http://tempo-gateway.tempo.svc.cluster.local"),
 	}
 }
