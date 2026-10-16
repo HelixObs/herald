@@ -136,6 +136,21 @@ func (n *Notifier) dispatch(ctx context.Context, e Event) {
 		return
 	}
 
+	// A Stage-matched route overrides where this event goes entirely (not
+	// additively) -- first match wins. Falls back to the event's own default
+	// Messaging/SCM if Stage is empty or matches no route; populating Stage
+	// correctly is on whatever emits the event, not something to work around
+	// here (e.g. via fuzzy matching).
+	messaging, scm := evCfg.Messaging, evCfg.SCM
+	if e.Stage != "" {
+		for _, r := range evCfg.Routes {
+			if r.Stage == e.Stage {
+				messaging, scm = r.Messaging, r.SCM
+				break
+			}
+		}
+	}
+
 	fp := fingerprint.Compute(e.InstrumentID, e.EventName, e.Message, e.Stage)
 
 	if n.silence.IsSilenced(ctx, e.InstrumentID, e.EventName, fp) {
@@ -163,7 +178,7 @@ func (n *Notifier) dispatch(ctx context.Context, e Event) {
 		wg        sync.WaitGroup
 	)
 
-	for _, sc := range evCfg.SCM {
+	for _, sc := range scm {
 		sc := sc
 		backend, ok := n.scm[sc.Type]
 		if !ok {
@@ -192,7 +207,7 @@ func (n *Notifier) dispatch(ctx context.Context, e Event) {
 
 	wg.Wait() // block until all SCM goroutines have finished and URLs are collected
 
-	for _, mc := range evCfg.Messaging {
+	for _, mc := range messaging {
 		mc := mc
 		backend, ok := n.messaging[mc.Type]
 		if !ok {
@@ -292,14 +307,21 @@ func (n *Notifier) flushDigests(ctx context.Context) {
 	reg := n.cfg.Get()
 	for _, instCfg := range reg {
 		for _, evCfg := range instCfg.Events {
-			for _, mc := range evCfg.Messaging {
-				backend, ok := n.messaging[mc.Type]
-				if !ok {
-					continue
-				}
-				backend.FlushDigests(ctx, mc.Destination, mc.SampleWindowSeconds)
+			n.flushMessaging(ctx, evCfg.Messaging)
+			for _, r := range evCfg.Routes {
+				n.flushMessaging(ctx, r.Messaging)
 			}
 		}
+	}
+}
+
+func (n *Notifier) flushMessaging(ctx context.Context, calls []config.MessagingCall) {
+	for _, mc := range calls {
+		backend, ok := n.messaging[mc.Type]
+		if !ok {
+			continue
+		}
+		backend.FlushDigests(ctx, mc.Destination, mc.SampleWindowSeconds)
 	}
 }
 

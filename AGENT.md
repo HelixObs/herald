@@ -163,6 +163,22 @@ notifications:
         labels: [helixobs, bug]
         auto_close_after_days: 7
         on_recurrence_after_close: reopen     # or "new_issue"
+
+      # Optional: route this event to a different channel/webhook per Stage
+      # (Event.Stage, populated from the emitting span event's "stage"
+      # metadata — see interceptor.go). Checked in order, first match wins.
+      # Falls back to the slack/github blocks above if Stage is empty or
+      # matches no route here — populating Stage correctly is on whatever
+      # emits the event, Herald does not try to work around a missing or
+      # misspelled value.
+      routes:
+        - match:
+            stage: hdf5-conversion
+          slack:
+            channel: "#baseband-alerts"
+            webhook_env: BASEBAND_SLACK_WEBHOOK
+            sample_window_seconds: 600
+            max_per_window: 1
 ```
 
 Config files are hot-reloaded every `NOTIFIER_RELOAD_INTERVAL_SECS` seconds without a restart.

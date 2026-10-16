@@ -298,3 +298,114 @@ func TestGetEmptyBeforeLoad(t *testing.T) {
 		t.Errorf("expected empty registry before load, got %d entries", len(reg))
 	}
 }
+
+func TestLoadFile_RouteOverridesChannelAndWebhook(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("ROUTE_DEFAULT_WEBHOOK", "https://hooks.slack.com/default")
+	t.Setenv("ROUTE_BASEBAND_WEBHOOK", "https://hooks.slack.com/baseband")
+	writeYAML(t, dir, "test.yml", `
+instrument_id: ROUTED
+notifications:
+  slack_webhook_env: ROUTE_DEFAULT_WEBHOOK
+  events:
+    helix.error:
+      slack:
+        channel: "#general-alerts"
+        sample_window_seconds: 60
+        max_per_window: 1
+      routes:
+        - match:
+            stage: hdf5-conversion
+          slack:
+            channel: "#baseband-alerts"
+            webhook_env: ROUTE_BASEBAND_WEBHOOK
+            sample_window_seconds: 60
+            max_per_window: 1
+`)
+	l := config.New(dir, 5*time.Second, 60*time.Second)
+	l.Start(t.Context(), time.Hour)
+	reg := l.Get()
+
+	cfg, ok := reg["ROUTED"]
+	if !ok {
+		t.Fatal("expected ROUTED in registry")
+	}
+	evCfg := cfg.Events["helix.error"]
+
+	if len(evCfg.Messaging) != 1 || evCfg.Messaging[0].Channel != "#general-alerts" {
+		t.Fatalf("expected default messaging on #general-alerts, got %+v", evCfg.Messaging)
+	}
+	if len(evCfg.Routes) != 1 {
+		t.Fatalf("expected 1 route, got %d", len(evCfg.Routes))
+	}
+	route := evCfg.Routes[0]
+	if route.Stage != "hdf5-conversion" {
+		t.Errorf("expected route.Stage=hdf5-conversion, got %q", route.Stage)
+	}
+	if len(route.Messaging) != 1 {
+		t.Fatalf("expected 1 messaging call on route, got %d", len(route.Messaging))
+	}
+	mc := route.Messaging[0]
+	if mc.Channel != "#baseband-alerts" {
+		t.Errorf("expected route channel #baseband-alerts, got %q", mc.Channel)
+	}
+	if mc.Destination != "https://hooks.slack.com/baseband" {
+		t.Errorf("expected route's own webhook override, got %q", mc.Destination)
+	}
+}
+
+func TestLoadFile_RouteMissingStage(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("NOSTAGE_WEBHOOK", "https://hooks.slack.com/test")
+	writeYAML(t, dir, "test.yml", `
+instrument_id: NOSTAGE
+notifications:
+  slack_webhook_env: NOSTAGE_WEBHOOK
+  events:
+    helix.error:
+      slack:
+        channel: "#alerts"
+        sample_window_seconds: 60
+        max_per_window: 1
+      routes:
+        - slack:
+            channel: "#other"
+            sample_window_seconds: 60
+            max_per_window: 1
+`)
+	l := config.New(dir, 5*time.Second, 60*time.Second)
+	l.Start(t.Context(), time.Hour)
+	reg := l.Get()
+	if _, ok := reg["NOSTAGE"]; ok {
+		t.Error("expected NOSTAGE absent from registry due to route missing match.stage")
+	}
+}
+
+func TestLoadFile_RouteReusesSlackValidation(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("BADROUTE_WEBHOOK", "https://hooks.slack.com/test")
+	writeYAML(t, dir, "test.yml", `
+instrument_id: BADROUTE
+notifications:
+  slack_webhook_env: BADROUTE_WEBHOOK
+  events:
+    helix.error:
+      slack:
+        channel: "#alerts"
+        sample_window_seconds: 60
+        max_per_window: 1
+      routes:
+        - match:
+            stage: some-stage
+          slack:
+            channel: missing-hash-prefix
+            sample_window_seconds: 60
+            max_per_window: 1
+`)
+	l := config.New(dir, 5*time.Second, 60*time.Second)
+	l.Start(t.Context(), time.Hour)
+	reg := l.Get()
+	if _, ok := reg["BADROUTE"]; ok {
+		t.Error("expected BADROUTE absent from registry — route's channel reused the same # validation as the top-level event")
+	}
+}

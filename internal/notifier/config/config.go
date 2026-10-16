@@ -28,6 +28,19 @@ type EventConfig struct {
 	MessageTemplate string
 	Messaging       []MessagingCall
 	SCM             []SCMCall
+	// Routes overrides Messaging/SCM for events whose Stage exactly matches
+	// one of these, checked in order (first match wins). Falls back to the
+	// EventConfig's own Messaging/SCM above if Stage is empty or matches no
+	// route -- populating Stage correctly is on whatever emits the event,
+	// not something Herald tries to work around.
+	Routes []Route
+}
+
+// Route is a Stage-matched override of Messaging/SCM within one EventConfig.
+type Route struct {
+	Stage     string
+	Messaging []MessagingCall
+	SCM       []SCMCall
 }
 
 // MessagingCall holds resolved config for one messaging backend invocation
@@ -44,9 +57,9 @@ type MessagingCall struct {
 // SCMCall holds resolved config for one SCM backend invocation
 // (e.g. a GitHub repo, a GitLab project, etc.).
 type SCMCall struct {
-	Type                   string   // backend type: "github", "gitlab", …
-	Token                  string   // resolved credential
-	Repo                   string   // "owner/repo" or equivalent
+	Type                   string // backend type: "github", "gitlab", …
+	Token                  string // resolved credential
+	Repo                   string // "owner/repo" or equivalent
 	Labels                 []string
 	AutoCloseAfterDays     int
 	OnRecurrenceAfterClose string // "reopen" (default) or "new_issue"
@@ -69,6 +82,18 @@ type eventYAML struct {
 	MessageTemplate string      `yaml:"message_template"`
 	Slack           *slackYAML  `yaml:"slack"`
 	Github          *githubYAML `yaml:"github"`
+	Routes          []routeYAML `yaml:"routes"`
+}
+
+// routeYAML overrides slack/github for events whose Stage matches Match.Stage.
+type routeYAML struct {
+	Match  matchYAML   `yaml:"match"`
+	Slack  *slackYAML  `yaml:"slack"`
+	Github *githubYAML `yaml:"github"`
+}
+
+type matchYAML struct {
+	Stage string `yaml:"stage"`
 }
 
 type slackYAML struct {
@@ -216,7 +241,7 @@ func (l *Loader) loadFile(path string) (*InstrumentConfig, []error) {
 		ecfg := EventConfig{MessageTemplate: ev.MessageTemplate}
 
 		if ev.Slack != nil {
-			mc, evErrs := l.resolveSlack(eventType, ev, raw.InstrumentID, defaultSlackURL)
+			mc, evErrs := l.resolveSlack(eventType, ev.Slack, raw.InstrumentID, defaultSlackURL)
 			errs = append(errs, evErrs...)
 			if mc != nil {
 				mc.MessageTemplate = ev.MessageTemplate
@@ -225,11 +250,36 @@ func (l *Loader) loadFile(path string) (*InstrumentConfig, []error) {
 		}
 
 		if ev.Github != nil {
-			sc, evErrs := l.resolveGithub(eventType, ev, raw.InstrumentID, defaultGithubToken)
+			sc, evErrs := l.resolveGithub(eventType, ev.Github, defaultGithubToken)
 			errs = append(errs, evErrs...)
 			if sc != nil {
 				ecfg.SCM = append(ecfg.SCM, *sc)
 			}
+		}
+
+		for i, r := range ev.Routes {
+			label := fmt.Sprintf("%s.routes[%d]", eventType, i)
+			if r.Match.Stage == "" {
+				errs = append(errs, fmt.Errorf("notifications.events[%q].match.stage: required", label))
+				continue
+			}
+			route := Route{Stage: r.Match.Stage}
+			if r.Slack != nil {
+				mc, evErrs := l.resolveSlack(label, r.Slack, raw.InstrumentID, defaultSlackURL)
+				errs = append(errs, evErrs...)
+				if mc != nil {
+					mc.MessageTemplate = ev.MessageTemplate
+					route.Messaging = append(route.Messaging, *mc)
+				}
+			}
+			if r.Github != nil {
+				sc, evErrs := l.resolveGithub(label, r.Github, defaultGithubToken)
+				errs = append(errs, evErrs...)
+				if sc != nil {
+					route.SCM = append(route.SCM, *sc)
+				}
+			}
+			ecfg.Routes = append(ecfg.Routes, route)
 		}
 
 		if len(errs) == 0 {
@@ -243,9 +293,8 @@ func (l *Loader) loadFile(path string) (*InstrumentConfig, []error) {
 	return cfg, nil
 }
 
-func (l *Loader) resolveSlack(eventType string, ev eventYAML, instrumentID, defaultURL string) (*MessagingCall, []error) {
+func (l *Loader) resolveSlack(eventType string, s *slackYAML, instrumentID, defaultURL string) (*MessagingCall, []error) {
 	var errs []error
-	s := ev.Slack
 
 	if s.Channel == "" {
 		errs = append(errs, fmt.Errorf("notifications.events[%q].slack.channel: required", eventType))
@@ -289,9 +338,8 @@ func (l *Loader) resolveSlack(eventType string, ev eventYAML, instrumentID, defa
 	}, nil
 }
 
-func (l *Loader) resolveGithub(eventType string, ev eventYAML, instrumentID, defaultToken string) (*SCMCall, []error) {
+func (l *Loader) resolveGithub(eventType string, g *githubYAML, defaultToken string) (*SCMCall, []error) {
 	var errs []error
-	g := ev.Github
 
 	if g.Repo == "" || !strings.Contains(g.Repo, "/") {
 		errs = append(errs, fmt.Errorf("notifications.events[%q].github.repo: must be in owner/repo format", eventType))

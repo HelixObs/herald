@@ -40,17 +40,19 @@ func (m *mockSilenceDB) ActiveSilences(_ context.Context, _ string) ([]db.Silenc
 
 // stubMessaging records calls and optionally blocks until released.
 type stubMessaging struct {
-	mu      sync.Mutex
-	sends   []notifier.Message
-	blocked chan struct{} // if non-nil, Send blocks until closed
+	mu           sync.Mutex
+	sends        []notifier.Message
+	destinations []string      // destination arg passed to each Send, parallel to sends
+	blocked      chan struct{} // if non-nil, Send blocks until closed
 }
 
-func (s *stubMessaging) Send(_ context.Context, _, _ string, msg notifier.Message, _, _ int) (bool, error) {
+func (s *stubMessaging) Send(_ context.Context, destination, _ string, msg notifier.Message, _, _ int) (bool, error) {
 	if s.blocked != nil {
 		<-s.blocked
 	}
 	s.mu.Lock()
 	s.sends = append(s.sends, msg)
+	s.destinations = append(s.destinations, destination)
 	s.mu.Unlock()
 	return true, nil
 }
@@ -70,6 +72,15 @@ func (s *stubMessaging) last() notifier.Message {
 		return notifier.Message{}
 	}
 	return s.sends[len(s.sends)-1]
+}
+
+func (s *stubMessaging) lastDestination() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.destinations) == 0 {
+		return ""
+	}
+	return s.destinations[len(s.destinations)-1]
 }
 
 // stubSCM records dispatch calls and returns a fake issue URL.
@@ -714,6 +725,91 @@ notifications:
 
 	n.Send(notifier.Event{InstrumentID: "NOSCM", EventName: "helix.error", EntityID: "e1", Message: "test"})
 	waitFor(t, 500*time.Millisecond, func() bool { return stub.count() >= 1 })
+}
+
+// ── Stage-matched routes ───────────────────────────────────────────────────────
+
+func routedTestConfig(t *testing.T) *config.Loader {
+	t.Helper()
+	t.Setenv("ROUTE_DEFAULT_WEBHOOK", "https://hooks.slack.com/default")
+	t.Setenv("ROUTE_BASEBAND_WEBHOOK", "https://hooks.slack.com/baseband")
+	return yamlLoader(t, `
+instrument_id: ROUTED
+notifications:
+  slack_webhook_env: ROUTE_DEFAULT_WEBHOOK
+  events:
+    helix.error:
+      slack:
+        channel: "#general-alerts"
+        sample_window_seconds: 60
+        max_per_window: 5
+      routes:
+        - match:
+            stage: hdf5-conversion
+          slack:
+            channel: "#baseband-alerts"
+            webhook_env: ROUTE_BASEBAND_WEBHOOK
+            sample_window_seconds: 60
+            max_per_window: 5
+`)
+}
+
+func TestDispatch_StageMatchingRouteOverridesDestination(t *testing.T) {
+	cfg := routedTestConfig(t)
+	sl := silence.New(noopSilenceDB{}, time.Minute)
+	stub := &stubMessaging{}
+	n := notifier.New(cfg, sl, newTestMetrics(), 10, "http://ui", "http://grafana")
+	n.RegisterMessaging("slack", stub)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go n.Start(ctx)
+
+	n.Send(notifier.Event{InstrumentID: "ROUTED", EventName: "helix.error", EntityID: "e1", Stage: "hdf5-conversion", Message: "disk full"})
+	waitFor(t, 500*time.Millisecond, func() bool { return stub.count() == 1 })
+
+	if got := stub.lastDestination(); got != "https://hooks.slack.com/baseband" {
+		t.Errorf("expected matched route's webhook, got %q", got)
+	}
+}
+
+func TestDispatch_NonMatchingStageFallsBackToDefault(t *testing.T) {
+	cfg := routedTestConfig(t)
+	sl := silence.New(noopSilenceDB{}, time.Minute)
+	stub := &stubMessaging{}
+	n := notifier.New(cfg, sl, newTestMetrics(), 10, "http://ui", "http://grafana")
+	n.RegisterMessaging("slack", stub)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go n.Start(ctx)
+
+	n.Send(notifier.Event{InstrumentID: "ROUTED", EventName: "helix.error", EntityID: "e1", Stage: "some-other-stage", Message: "x"})
+	waitFor(t, 500*time.Millisecond, func() bool { return stub.count() == 1 })
+
+	if got := stub.lastDestination(); got != "https://hooks.slack.com/default" {
+		t.Errorf("expected default webhook for a stage matching no route, got %q", got)
+	}
+}
+
+func TestDispatch_EmptyStageFallsBackToDefault(t *testing.T) {
+	cfg := routedTestConfig(t)
+	sl := silence.New(noopSilenceDB{}, time.Minute)
+	stub := &stubMessaging{}
+	n := notifier.New(cfg, sl, newTestMetrics(), 10, "http://ui", "http://grafana")
+	n.RegisterMessaging("slack", stub)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go n.Start(ctx)
+
+	// No Stage set at all -- e.g. an error emitted without populating it correctly.
+	n.Send(notifier.Event{InstrumentID: "ROUTED", EventName: "helix.error", EntityID: "e1", Message: "x"})
+	waitFor(t, 500*time.Millisecond, func() bool { return stub.count() == 1 })
+
+	if got := stub.lastDestination(); got != "https://hooks.slack.com/default" {
+		t.Errorf("expected default webhook when Stage is empty, got %q", got)
+	}
 }
 
 // ── flushDigests via short digestInterval ─────────────────────────────────────
