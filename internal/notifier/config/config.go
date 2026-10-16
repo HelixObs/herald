@@ -121,6 +121,12 @@ type Loader struct {
 	current         atomic.Value // holds Registry
 	minSlackWindow  time.Duration
 	minGithubWindow time.Duration
+
+	// Config warnings are logged once, not on every reload: warned holds the
+	// warnings emitted by the previous reload, pending those seen by the one
+	// in progress. Only touched from reload(), which never runs concurrently.
+	warned  map[string]bool
+	pending map[string]bool
 }
 
 // New creates a Loader. minSlackWindow and minGithubWindow are floors enforced
@@ -159,7 +165,24 @@ func (l *Loader) Get() Registry {
 	return v.(Registry)
 }
 
+// warn logs a config warning unless the previous reload already logged the
+// identical one, so an unchanged config doesn't repeat it every interval.
+// A warning that clears and later reappears is logged again.
+func (l *Loader) warn(msg string, args ...any) {
+	key := fmt.Sprint(append([]any{msg}, args...)...)
+	if l.pending != nil {
+		l.pending[key] = true
+	}
+	if l.warned[key] {
+		return
+	}
+	slog.Warn(msg, args...)
+}
+
 func (l *Loader) reload() {
+	l.pending = map[string]bool{}
+	defer func() { l.warned, l.pending = l.pending, nil }()
+
 	patterns := []string{
 		filepath.Join(l.dir, "*-context.yml"),
 		filepath.Join(l.dir, "*-context.yaml"),
@@ -187,7 +210,7 @@ func (l *Loader) reload() {
 			for i, e := range errs {
 				msgs[i] = e.Error()
 			}
-			slog.Warn("notifier: skipping instrument config",
+			l.warn("notifier: skipping instrument config",
 				"file", f,
 				"errors", strings.Join(msgs, "; "))
 			continue
@@ -311,7 +334,7 @@ func (l *Loader) resolveSlack(eventType string, s *slackYAML, instrumentID, defa
 	minW := int(l.minSlackWindow.Seconds())
 	window := s.SampleWindowSeconds
 	if window < minW {
-		slog.Warn("notifier: clamping sample_window_seconds to minimum",
+		l.warn("notifier: clamping sample_window_seconds to minimum",
 			"instrument", instrumentID, "event", eventType,
 			"configured", window, "minimum", minW)
 		window = minW
@@ -348,7 +371,7 @@ func (l *Loader) resolveGithub(eventType string, g *githubYAML, defaultToken str
 		errs = append(errs, fmt.Errorf("notifications.events[%q].github.repo: must be in owner/repo format", eventType))
 	}
 	if g.AutoCloseAfterDays != 0 {
-		slog.Warn("notifier: github.auto_close_after_days is deprecated and ignored; HelixObs does not close issues",
+		l.warn("notifier: github.auto_close_after_days is deprecated and ignored; HelixObs does not close issues",
 			"event", eventType, "repo", g.Repo)
 	}
 	recurrence := g.OnRecurrenceAfterClose
