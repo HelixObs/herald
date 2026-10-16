@@ -180,11 +180,11 @@ func buildBody(p notifier.SCMParams, occurrences int, firstSeen, lastSeen time.T
 		shown++
 	}
 
-	sb.WriteString("\n---\n*Tracked automatically by HelixObs.")
+	sb.WriteString("\n---\n*Opened by HelixObs. Close this issue once it's resolved — if the error recurs, HelixObs will reopen it or open a new one.")
 	if p.NotificationsURL != "" {
-		fmt.Fprintf(&sb, " [Manage silences](%s).", p.NotificationsURL)
+		fmt.Fprintf(&sb, " To stop notifications instead, [add a silence](%s).", p.NotificationsURL)
 	}
-	sb.WriteString(" Do not close manually — use the silence API to suppress.*")
+	sb.WriteString("*")
 	return sb.String()
 }
 

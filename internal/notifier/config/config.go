@@ -61,7 +61,6 @@ type SCMCall struct {
 	Token                  string // resolved credential
 	Repo                   string // "owner/repo" or equivalent
 	Labels                 []string
-	AutoCloseAfterDays     int
 	OnRecurrenceAfterClose string // "reopen" (default) or "new_issue"
 }
 
@@ -106,8 +105,12 @@ type slackYAML struct {
 type githubYAML struct {
 	Repo                   string   `yaml:"repo"`
 	Labels                 []string `yaml:"labels"`
-	AutoCloseAfterDays     int      `yaml:"auto_close_after_days"`
 	OnRecurrenceAfterClose string   `yaml:"on_recurrence_after_close"`
+
+	// Deprecated: HelixObs never closes issues -- closing is left to the
+	// people triaging them. Still parsed so existing configs keep loading;
+	// a non-zero value only logs a warning.
+	AutoCloseAfterDays int `yaml:"auto_close_after_days"`
 }
 
 // ── Loader ────────────────────────────────────────────────────────────────────
@@ -344,8 +347,9 @@ func (l *Loader) resolveGithub(eventType string, g *githubYAML, defaultToken str
 	if g.Repo == "" || !strings.Contains(g.Repo, "/") {
 		errs = append(errs, fmt.Errorf("notifications.events[%q].github.repo: must be in owner/repo format", eventType))
 	}
-	if g.AutoCloseAfterDays < 0 {
-		errs = append(errs, fmt.Errorf("notifications.events[%q].github.auto_close_after_days: must be >= 0", eventType))
+	if g.AutoCloseAfterDays != 0 {
+		slog.Warn("notifier: github.auto_close_after_days is deprecated and ignored; HelixObs does not close issues",
+			"event", eventType, "repo", g.Repo)
 	}
 	recurrence := g.OnRecurrenceAfterClose
 	if recurrence == "" {
@@ -366,7 +370,6 @@ func (l *Loader) resolveGithub(eventType string, g *githubYAML, defaultToken str
 		Token:                  defaultToken,
 		Repo:                   g.Repo,
 		Labels:                 g.Labels,
-		AutoCloseAfterDays:     g.AutoCloseAfterDays,
 		OnRecurrenceAfterClose: recurrence,
 	}, nil
 }
