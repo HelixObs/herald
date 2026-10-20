@@ -727,12 +727,13 @@ notifications:
 	waitFor(t, 500*time.Millisecond, func() bool { return stub.count() >= 1 })
 }
 
-// ── Stage-matched routes ───────────────────────────────────────────────────────
+// ── Operation-matched overrides ───────────────────────────────────────────────
 
-func routedTestConfig(t *testing.T) *config.Loader {
+func overrideTestConfig(t *testing.T) *config.Loader {
 	t.Helper()
 	t.Setenv("ROUTE_DEFAULT_WEBHOOK", "https://hooks.slack.com/default")
 	t.Setenv("ROUTE_BASEBAND_WEBHOOK", "https://hooks.slack.com/baseband")
+	t.Setenv("ROUTE_KKO_WEBHOOK", "https://hooks.slack.com/kko")
 	return yamlLoader(t, `
 instrument_id: ROUTED
 notifications:
@@ -743,9 +744,14 @@ notifications:
         channel: "#general-alerts"
         sample_window_seconds: 60
         max_per_window: 5
-      routes:
-        - match:
-            stage: hdf5-conversion
+      overrides:
+        - match: { operation: baseband-callback, stage: request-to-kko-coco }
+          slack:
+            channel: "#kko-alerts"
+            webhook_env: ROUTE_KKO_WEBHOOK
+            sample_window_seconds: 60
+            max_per_window: 5
+        - match: { operation: convert-data-to-hdf5 }
           slack:
             channel: "#baseband-alerts"
             webhook_env: ROUTE_BASEBAND_WEBHOOK
@@ -754,61 +760,84 @@ notifications:
 `)
 }
 
-func TestDispatch_StageMatchingRouteOverridesDestination(t *testing.T) {
-	cfg := routedTestConfig(t)
-	sl := silence.New(noopSilenceDB{}, time.Minute)
-	stub := &stubMessaging{}
-	n := notifier.New(cfg, sl, newTestMetrics(), 10, "http://ui", "http://grafana")
-	n.RegisterMessaging("slack", stub)
+func TestDispatch_Overrides(t *testing.T) {
+	cases := []struct {
+		name  string
+		event notifier.Event
+		want  string
+	}{
+		{"operation match", notifier.Event{Operation: "convert-data-to-hdf5", Message: "disk full"}, "https://hooks.slack.com/baseband"},
+		{"operation match ignores stage when override sets none", notifier.Event{Operation: "convert-data-to-hdf5", Stage: "anything", Message: "disk full"}, "https://hooks.slack.com/baseband"},
+		{"operation and stage match", notifier.Event{Operation: "baseband-callback", Stage: "request-to-kko-coco", Message: "x"}, "https://hooks.slack.com/kko"},
+		{"stage mismatch falls back", notifier.Event{Operation: "baseband-callback", Stage: "request-to-gbo-coco", Message: "x"}, "https://hooks.slack.com/default"},
+		{"stage alone never matches", notifier.Event{Operation: "write-header", Stage: "request-to-kko-coco", Message: "x"}, "https://hooks.slack.com/default"},
+		{"no override for operation", notifier.Event{Operation: "replicate", Message: "x"}, "https://hooks.slack.com/default"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			cfg := overrideTestConfig(t)
+			sl := silence.New(noopSilenceDB{}, time.Minute)
+			stub := &stubMessaging{}
+			n := notifier.New(cfg, sl, newTestMetrics(), 10, "http://ui", "http://grafana")
+			n.RegisterMessaging("slack", stub)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go n.Start(ctx)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			go n.Start(ctx)
 
-	n.Send(notifier.Event{InstrumentID: "ROUTED", EventName: "helix.error", EntityID: "e1", Stage: "hdf5-conversion", Message: "disk full"})
-	waitFor(t, 500*time.Millisecond, func() bool { return stub.count() == 1 })
+			e := c.event
+			e.InstrumentID, e.EventName, e.EntityID = "ROUTED", "helix.error", "e1"
+			n.Send(e)
+			waitFor(t, 500*time.Millisecond, func() bool { return stub.count() == 1 })
 
-	if got := stub.lastDestination(); got != "https://hooks.slack.com/baseband" {
-		t.Errorf("expected matched route's webhook, got %q", got)
+			if got := stub.lastDestination(); got != c.want {
+				t.Errorf("destination = %q, want %q", got, c.want)
+			}
+		})
 	}
 }
 
-func TestDispatch_NonMatchingStageFallsBackToDefault(t *testing.T) {
-	cfg := routedTestConfig(t)
+func TestDispatch_PlaybookAndOperationReachBackends(t *testing.T) {
+	t.Setenv("PB_WEBHOOK", "https://hooks.slack.com/pb")
+	t.Setenv("PB_GH_TOKEN", "ghp_test")
+	cfg := yamlLoader(t, `
+instrument_id: PB
+notifications:
+  slack_webhook_env: PB_WEBHOOK
+  github_token_env: PB_GH_TOKEN
+  playbook_base: https://github.com/org/troubleshooting/tree/main/runbooks
+  events:
+    helix.error:
+      slack:
+        channel: "#alerts"
+        sample_window_seconds: 60
+        max_per_window: 5
+      github:
+        repo: org/troubleshooting
+`)
 	sl := silence.New(noopSilenceDB{}, time.Minute)
-	stub := &stubMessaging{}
+	msgStub, scmStub := &stubMessaging{}, &stubSCM{}
 	n := notifier.New(cfg, sl, newTestMetrics(), 10, "http://ui", "http://grafana")
-	n.RegisterMessaging("slack", stub)
+	n.RegisterMessaging("slack", msgStub)
+	n.RegisterSCM("github", scmStub)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go n.Start(ctx)
 
-	n.Send(notifier.Event{InstrumentID: "ROUTED", EventName: "helix.error", EntityID: "e1", Stage: "some-other-stage", Message: "x"})
-	waitFor(t, 500*time.Millisecond, func() bool { return stub.count() == 1 })
+	n.Send(notifier.Event{InstrumentID: "PB", EventName: "helix.error", EntityID: "e1", Operation: "replicate", Message: "Dataset replication failed."})
+	waitFor(t, 500*time.Millisecond, func() bool { return msgStub.count() == 1 })
 
-	if got := stub.lastDestination(); got != "https://hooks.slack.com/default" {
-		t.Errorf("expected default webhook for a stage matching no route, got %q", got)
+	const want = "https://github.com/org/troubleshooting/tree/main/runbooks/replicate"
+	if m := msgStub.last(); m.PlaybookURL != want || !m.PlaybookFromBase || m.Operation != "replicate" {
+		t.Errorf("messaging got playbook=%q fromBase=%v operation=%q", m.PlaybookURL, m.PlaybookFromBase, m.Operation)
 	}
-}
-
-func TestDispatch_EmptyStageFallsBackToDefault(t *testing.T) {
-	cfg := routedTestConfig(t)
-	sl := silence.New(noopSilenceDB{}, time.Minute)
-	stub := &stubMessaging{}
-	n := notifier.New(cfg, sl, newTestMetrics(), 10, "http://ui", "http://grafana")
-	n.RegisterMessaging("slack", stub)
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go n.Start(ctx)
-
-	// No Stage set at all -- e.g. an error emitted without populating it correctly.
-	n.Send(notifier.Event{InstrumentID: "ROUTED", EventName: "helix.error", EntityID: "e1", Message: "x"})
-	waitFor(t, 500*time.Millisecond, func() bool { return stub.count() == 1 })
-
-	if got := stub.lastDestination(); got != "https://hooks.slack.com/default" {
-		t.Errorf("expected default webhook when Stage is empty, got %q", got)
+	p := scmStub.last()
+	if p.PlaybookURL != want || !p.PlaybookFromBase || p.Operation != "replicate" {
+		t.Errorf("SCM got playbook=%q fromBase=%v operation=%q", p.PlaybookURL, p.PlaybookFromBase, p.Operation)
+	}
+	if p.Title != "[PB] Dataset replication failed. (replicate)" {
+		t.Errorf("unexpected issue title %q", p.Title)
 	}
 }
 

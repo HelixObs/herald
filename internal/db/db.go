@@ -52,6 +52,7 @@ type EntityEvent struct {
 	InstrumentID string
 	EntityID     string
 	TraceID      string
+	Operation    string // name of the span that emitted the event
 	EventName    string
 	TimestampNs  int64
 	Metadata     map[string]string
@@ -676,6 +677,7 @@ func (s *Store) QueryInstruments(ctx context.Context) ([]string, error) {
 type AlertRow struct {
 	GroupKey        string            `json:"group_key"`
 	Fingerprint     string            `json:"fingerprint"`
+	Operation       string            `json:"operation,omitempty"`
 	GithubIssueURL  string            `json:"github_issue_url,omitempty"`
 	Metadata        map[string]string `json:"metadata"`
 	OccurrenceCount int               `json:"occurrence_count"`
@@ -698,7 +700,8 @@ func (s *Store) QueryAlerts(ctx context.Context, instrumentID string) ([]AlertRo
 	start := time.Now()
 	rows, err := s.pool.Query(ctx, `
 		SELECT
-			md5(normalised_message) AS grp,
+			md5(normalised_message || '|' || operation) AS grp,
+			operation,
 			(array_agg(metadata ORDER BY last_seen_at DESC))[1] AS metadata,
 			SUM(occurrence_count) AS occurrence_count,
 			MIN(first_seen_at) AS first_seen,
@@ -708,7 +711,7 @@ func (s *Store) QueryAlerts(ctx context.Context, instrumentID string) ([]AlertRo
 		WHERE instrument_id = $1
 		  AND event_name = 'helix.error'
 		  AND last_seen_at > now() - INTERVAL '7 days'
-		GROUP BY normalised_message
+		GROUP BY normalised_message, operation
 		ORDER BY MAX(last_seen_at) DESC
 		LIMIT 50`,
 		instrumentID,
@@ -731,7 +734,7 @@ func (s *Store) QueryAlerts(ctx context.Context, instrumentID string) ([]AlertRo
 			row     AlertRow
 			metaRaw []byte
 		)
-		if err := rows.Scan(&row.GroupKey, &metaRaw, &row.OccurrenceCount, &row.FirstSeen, &row.LastSeen, &row.EntityIDs); err != nil {
+		if err := rows.Scan(&row.GroupKey, &row.Operation, &metaRaw, &row.OccurrenceCount, &row.FirstSeen, &row.LastSeen, &row.EntityIDs); err != nil {
 			return nil, fmt.Errorf("scan: %w", err)
 		}
 		if err := json.Unmarshal(metaRaw, &row.Metadata); err != nil {
@@ -744,7 +747,7 @@ func (s *Store) QueryAlerts(ctx context.Context, instrumentID string) ([]AlertRo
 		if msg == "" {
 			msg = row.Metadata["exception.message"]
 		}
-		row.Fingerprint = fingerprint.Compute(instrumentID, "helix.error", msg, row.Metadata["stage"])
+		row.Fingerprint = fingerprint.Compute(instrumentID, "helix.error", msg, row.Operation, row.Metadata["stage"])
 		if alertSilenced(silences, "helix.error", row.Fingerprint) {
 			continue
 		}
@@ -802,7 +805,7 @@ func alertSilenced(silences []Silence, eventType, fp string) bool {
 
 // WriteEntityEvent deduplicates and persists one helix.* span event.
 // The normalised message (volatile tokens stripped) forms the dedup key together
-// with entity_id and event_name. On first occurrence both entity_event_dedup and
+// with entity_id, event_name and operation. On first occurrence both entity_event_dedup and
 // entity_events are written; subsequent identical events only increment
 // occurrence_count and refresh last_seen_at in entity_event_dedup.
 func (s *Store) WriteEntityEvent(ctx context.Context, ev EntityEvent) error {
@@ -820,15 +823,15 @@ func (s *Store) WriteEntityEvent(ctx context.Context, ev EntityEvent) error {
 	var isNew bool
 	err = s.pool.QueryRow(ctx, `
 		INSERT INTO entity_event_dedup
-			(entity_id, instrument_id, event_name, normalised_message, trace_id, metadata)
-		VALUES ($1, $2, $3, $4, $5, $6)
-		ON CONFLICT (entity_id, event_name, normalised_message) DO UPDATE
+			(entity_id, instrument_id, event_name, normalised_message, trace_id, operation, metadata)
+		VALUES ($1, $2, $3, $4, $5, $6, $7)
+		ON CONFLICT (entity_id, event_name, normalised_message, operation) DO UPDATE
 			SET occurrence_count = entity_event_dedup.occurrence_count + 1,
 			    last_seen_at     = now(),
 			    trace_id         = EXCLUDED.trace_id,
 			    metadata         = EXCLUDED.metadata
 		RETURNING (xmax = 0)`,
-		ev.EntityID, ev.InstrumentID, ev.EventName, normMsg, ev.TraceID, meta,
+		ev.EntityID, ev.InstrumentID, ev.EventName, normMsg, ev.TraceID, ev.Operation, meta,
 	).Scan(&isNew)
 	if err != nil {
 		return fmt.Errorf("upsert event dedup: %w", err)

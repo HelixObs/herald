@@ -89,7 +89,7 @@ func (icp *Interceptor) processSpan(span *tracepb.Span) {
 
 	instrumentID := attrStr(span.Attributes, attrInstrumentID)
 	parentIDsStr := attrStr(span.Attributes, attrParentIDs)
-	isOperation  := attrStr(span.Attributes, attrIsOperation) == "true"
+	isOperation := attrStr(span.Attributes, attrIsOperation) == "true"
 
 	// ── Resolve parent entity IDs → span links ────────────────────────
 	var parentIDs []string
@@ -138,6 +138,7 @@ func (icp *Interceptor) processSpan(span *tracepb.Span) {
 			InstrumentID: instrumentID,
 			EntityID:     entityID,
 			TraceID:      hex.EncodeToString(span.TraceId),
+			Operation:    span.Name,
 			EventName:    ev.Name,
 			TimestampNs:  int64(ev.TimeUnixNano),
 			Metadata:     attrsToMap(ev.Attributes),
@@ -208,7 +209,7 @@ func (icp *Interceptor) processSpan(span *tracepb.Span) {
 				EntityID:     ev.EntityID,
 				EventName:    ev.EventName,
 				Stage:        ev.Metadata["stage"],
-				Operation:    span.Name,
+				Operation:    ev.Operation,
 				Message:      coalesceMetadata(ev.Metadata, "message", "exception.message"),
 				TimestampNs:  ev.TimestampNs,
 				TraceID:      ev.TraceID,

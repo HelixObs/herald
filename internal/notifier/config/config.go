@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,6 +14,10 @@ import (
 
 	"gopkg.in/yaml.v3"
 )
+
+// Off is the YAML value that turns a destination off in an override
+// (`slack: off`, `github: off`).
+const Off = "off"
 
 // Registry maps instrument_id → resolved InstrumentConfig.
 type Registry map[string]*InstrumentConfig
@@ -28,19 +33,68 @@ type EventConfig struct {
 	MessageTemplate string
 	Messaging       []MessagingCall
 	SCM             []SCMCall
-	// Routes overrides Messaging/SCM for events whose Stage exactly matches
-	// one of these, checked in order (first match wins). Falls back to the
-	// EventConfig's own Messaging/SCM above if Stage is empty or matches no
-	// route -- populating Stage correctly is on whatever emits the event,
-	// not something Herald tries to work around.
-	Routes []Route
+	// Playbook is the event's playbook URL, already falling back to the
+	// instrument-level notifications.playbook. Empty means none configured.
+	// Used only when PlaybookBase is empty.
+	Playbook string
+	// PlaybookBase is notifications.playbook_base without a trailing slash.
+	// When set, an event's playbook is PlaybookBase/<operation>, unless the
+	// matching override sets its own.
+	PlaybookBase string
+	// Overrides are checked in order; the first whose Match fits the event
+	// applies. Each is fully resolved at load time: anything the override
+	// left unset was inherited from this EventConfig.
+	Overrides []Override
 }
 
-// Route is a Stage-matched override of Messaging/SCM within one EventConfig.
-type Route struct {
-	Stage     string
+// Override replaces Messaging/SCM/Playbook for events matching Operation (and
+// Stage, if set). Operation is compared against the name of the span that
+// emitted the event; Stage against the event's "stage" metadata. Both exact.
+type Override struct {
+	Operation string
+	Stage     string // optional; empty matches any stage, including none
 	Messaging []MessagingCall
 	SCM       []SCMCall
+	// Playbook is set only when the override itself sets one; otherwise the
+	// event's playbook resolution applies (see EventConfig.Resolve).
+	Playbook string
+}
+
+// Playbook is a resolved playbook link.
+type Playbook struct {
+	URL string
+	// Generated is true when URL was built from playbook_base and the
+	// operation name, so the page may not exist yet.
+	Generated bool
+}
+
+// Matches reports whether the override applies to an event from operation
+// with the given stage metadata.
+func (o Override) Matches(operation, stage string) bool {
+	return o.Operation == operation && (o.Stage == "" || o.Stage == stage)
+}
+
+// Resolve returns the Messaging, SCM and playbook for an event from operation
+// with the given stage metadata. Messaging and SCM come from the first
+// matching override, or the event if none matches. The playbook is, most
+// specific first: the matching override's own, PlaybookBase/<operation>, the
+// event's, then notifications.playbook (the last two already folded into
+// e.Playbook).
+func (e EventConfig) Resolve(operation, stage string) ([]MessagingCall, []SCMCall, Playbook) {
+	messaging, scm := e.Messaging, e.SCM
+	for _, o := range e.Overrides {
+		if o.Matches(operation, stage) {
+			if o.Playbook != "" {
+				return o.Messaging, o.SCM, Playbook{URL: o.Playbook}
+			}
+			messaging, scm = o.Messaging, o.SCM
+			break
+		}
+	}
+	if e.PlaybookBase != "" && operation != "" {
+		return messaging, scm, Playbook{URL: e.PlaybookBase + "/" + url.PathEscape(operation), Generated: true}
+	}
+	return messaging, scm, Playbook{URL: e.Playbook}
 }
 
 // MessagingCall holds resolved config for one messaging backend invocation
@@ -74,25 +128,55 @@ type instrumentYAML struct {
 type notificationsYAML struct {
 	SlackWebhookEnv string               `yaml:"slack_webhook_env"`
 	GithubTokenEnv  string               `yaml:"github_token_env"`
+	Playbook        string               `yaml:"playbook"`
+	PlaybookBase    string               `yaml:"playbook_base"`
 	Events          map[string]eventYAML `yaml:"events"`
 }
 
 type eventYAML struct {
-	MessageTemplate string      `yaml:"message_template"`
-	Slack           *slackYAML  `yaml:"slack"`
-	Github          *githubYAML `yaml:"github"`
-	Routes          []routeYAML `yaml:"routes"`
+	MessageTemplate string         `yaml:"message_template"`
+	Slack           *slackYAML     `yaml:"slack"`
+	Github          *githubYAML    `yaml:"github"`
+	Playbook        string         `yaml:"playbook"`
+	Overrides       []overrideYAML `yaml:"overrides"`
+
+	// Deprecated: replaced by overrides. Parsed only to warn that it's ignored.
+	Routes yaml.Node `yaml:"routes"`
 }
 
-// routeYAML overrides slack/github for events whose Stage matches Match.Stage.
-type routeYAML struct {
-	Match  matchYAML   `yaml:"match"`
-	Slack  *slackYAML  `yaml:"slack"`
-	Github *githubYAML `yaml:"github"`
+// overrideYAML replaces slack/github/playbook for events matching Match.
+// A block left out is inherited from the event; `off` turns it off.
+type overrideYAML struct {
+	Match    matchYAML              `yaml:"match"`
+	Slack    switchable[slackYAML]  `yaml:"slack"`
+	Github   switchable[githubYAML] `yaml:"github"`
+	Playbook string                 `yaml:"playbook"`
 }
 
 type matchYAML struct {
-	Stage string `yaml:"stage"`
+	Operation string `yaml:"operation"`
+	Stage     string `yaml:"stage"`
+}
+
+// switchable is an override's slack or github value: left out (inherit),
+// the scalar `off`, or a block that replaces the event's.
+type switchable[T any] struct {
+	Set   bool // key present in the YAML
+	Off   bool
+	Block *T
+}
+
+func (s *switchable[T]) UnmarshalYAML(n *yaml.Node) error {
+	s.Set = true
+	if n.Kind == yaml.ScalarNode {
+		if n.Value != Off {
+			return fmt.Errorf("line %d: must be a block or %q, got %q", n.Line, Off, n.Value)
+		}
+		s.Off = true
+		return nil
+	}
+	s.Block = new(T)
+	return n.Decode(s.Block)
 }
 
 type slackYAML struct {
@@ -251,6 +335,10 @@ func (l *Loader) loadFile(path string) (*InstrumentConfig, []error) {
 		defaultGithubToken = os.Getenv(raw.Notifications.GithubTokenEnv)
 	}
 
+	defaultPlaybook := l.resolvePlaybook(raw.InstrumentID, "notifications.playbook", raw.Notifications.Playbook)
+	playbookBase := strings.TrimRight(
+		l.resolvePlaybook(raw.InstrumentID, "notifications.playbook_base", raw.Notifications.PlaybookBase), "/")
+
 	cfg := &InstrumentConfig{
 		InstrumentID: raw.InstrumentID,
 		Events:       make(map[string]EventConfig, len(raw.Notifications.Events)),
@@ -264,7 +352,14 @@ func (l *Loader) loadFile(path string) (*InstrumentConfig, []error) {
 			continue
 		}
 
-		ecfg := EventConfig{MessageTemplate: ev.MessageTemplate}
+		ecfg := EventConfig{
+			MessageTemplate: ev.MessageTemplate,
+			Playbook:        defaultPlaybook,
+			PlaybookBase:    playbookBase,
+		}
+		if p := l.resolvePlaybook(raw.InstrumentID, fmt.Sprintf("events[%q].playbook", eventType), ev.Playbook); p != "" {
+			ecfg.Playbook = p
+		}
 
 		if ev.Slack != nil {
 			mc, evErrs := l.resolveSlack(eventType, ev.Slack, raw.InstrumentID, defaultSlackURL)
@@ -283,29 +378,52 @@ func (l *Loader) loadFile(path string) (*InstrumentConfig, []error) {
 			}
 		}
 
-		for i, r := range ev.Routes {
-			label := fmt.Sprintf("%s.routes[%d]", eventType, i)
-			if r.Match.Stage == "" {
-				errs = append(errs, fmt.Errorf("notifications.events[%q].match.stage: required", label))
+		if !ev.Routes.IsZero() {
+			l.warn("notifier: routes is no longer supported and is ignored; use overrides (match on operation)",
+				"instrument", raw.InstrumentID, "event", eventType)
+		}
+
+		for i, o := range ev.Overrides {
+			label := fmt.Sprintf("%s.overrides[%d]", eventType, i)
+			if o.Match.Operation == "" {
+				errs = append(errs, fmt.Errorf("notifications.events[%q].match.operation: required", label))
 				continue
 			}
-			route := Route{Stage: r.Match.Stage}
-			if r.Slack != nil {
-				mc, evErrs := l.resolveSlack(label, r.Slack, raw.InstrumentID, defaultSlackURL)
+			if !o.Slack.Set && !o.Github.Set && o.Playbook == "" {
+				errs = append(errs, fmt.Errorf("notifications.events[%q]: sets none of slack, github or playbook", label))
+				continue
+			}
+			ov := Override{
+				Operation: o.Match.Operation,
+				Stage:     o.Match.Stage,
+				Messaging: ecfg.Messaging,
+				SCM:       ecfg.SCM,
+			}
+			switch {
+			case o.Slack.Off:
+				ov.Messaging = nil
+			case o.Slack.Block != nil:
+				ov.Messaging = nil
+				mc, evErrs := l.resolveSlack(label, o.Slack.Block, raw.InstrumentID, defaultSlackURL)
 				errs = append(errs, evErrs...)
 				if mc != nil {
 					mc.MessageTemplate = ev.MessageTemplate
-					route.Messaging = append(route.Messaging, *mc)
+					ov.Messaging = []MessagingCall{*mc}
 				}
 			}
-			if r.Github != nil {
-				sc, evErrs := l.resolveGithub(label, r.Github, defaultGithubToken)
+			switch {
+			case o.Github.Off:
+				ov.SCM = nil
+			case o.Github.Block != nil:
+				ov.SCM = nil
+				sc, evErrs := l.resolveGithub(label, o.Github.Block, defaultGithubToken)
 				errs = append(errs, evErrs...)
 				if sc != nil {
-					route.SCM = append(route.SCM, *sc)
+					ov.SCM = []SCMCall{*sc}
 				}
 			}
-			ecfg.Routes = append(ecfg.Routes, route)
+			ov.Playbook = l.resolvePlaybook(raw.InstrumentID, label+".playbook", o.Playbook)
+			ecfg.Overrides = append(ecfg.Overrides, ov)
 		}
 
 		if len(errs) == 0 {
@@ -317,6 +435,22 @@ func (l *Loader) loadFile(path string) (*InstrumentConfig, []error) {
 		return nil, errs
 	}
 	return cfg, nil
+}
+
+// resolvePlaybook returns raw if it is an absolute http(s) URL. Anything else
+// is dropped with a warning rather than rejecting the config: a typo in a
+// documentation link must never stop alerts.
+func (l *Loader) resolvePlaybook(instrumentID, field, raw string) string {
+	if raw == "" {
+		return ""
+	}
+	u, err := url.Parse(raw)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		l.warn("notifier: ignoring playbook, not an absolute http(s) URL",
+			"instrument", instrumentID, "field", field, "value", raw)
+		return ""
+	}
+	return raw
 }
 
 func (l *Loader) resolveSlack(eventType string, s *slackYAML, instrumentID, defaultURL string) (*MessagingCall, []error) {

@@ -299,113 +299,266 @@ func TestGetEmptyBeforeLoad(t *testing.T) {
 	}
 }
 
-func TestLoadFile_RouteOverridesChannelAndWebhook(t *testing.T) {
+// ── Overrides and playbooks ───────────────────────────────────────────────────
+
+// load writes content as the only instrument config and returns the registry.
+func load(t *testing.T, content string) config.Registry {
+	t.Helper()
 	dir := t.TempDir()
-	t.Setenv("ROUTE_DEFAULT_WEBHOOK", "https://hooks.slack.com/default")
-	t.Setenv("ROUTE_BASEBAND_WEBHOOK", "https://hooks.slack.com/baseband")
-	writeYAML(t, dir, "test.yml", `
-instrument_id: ROUTED
+	writeYAML(t, dir, "test.yml", content)
+	l := config.New(dir, 5*time.Second, 60*time.Second)
+	l.Start(t.Context(), time.Hour)
+	return l.Get()
+}
+
+func overrideTestEnv(t *testing.T) {
+	t.Helper()
+	t.Setenv("OV_DEFAULT_WEBHOOK", "https://hooks.slack.com/default")
+	t.Setenv("OV_BASEBAND_WEBHOOK", "https://hooks.slack.com/baseband")
+	t.Setenv("OV_GH_TOKEN", "ghp_test")
+}
+
+// eventBlock is a helix.error event with slack, github and a playbook, to
+// which tests append an overrides list.
+const eventBlock = `
+instrument_id: OV
 notifications:
-  slack_webhook_env: ROUTE_DEFAULT_WEBHOOK
+  slack_webhook_env: OV_DEFAULT_WEBHOOK
+  github_token_env: OV_GH_TOKEN
+  playbook: https://wiki.example/Playbook
   events:
     helix.error:
+      playbook: https://wiki.example/Errors
       slack:
         channel: "#general-alerts"
         sample_window_seconds: 60
         max_per_window: 1
-      routes:
-        - match:
-            stage: hdf5-conversion
+      github:
+        repo: org/troubleshooting
+`
+
+func TestLoadFile_OverrideReplacesSetBlocksAndInheritsTheRest(t *testing.T) {
+	overrideTestEnv(t)
+	reg := load(t, eventBlock+`
+      overrides:
+        - match: { operation: convert-data-to-hdf5 }
           slack:
             channel: "#baseband-alerts"
-            webhook_env: ROUTE_BASEBAND_WEBHOOK
+            webhook_env: OV_BASEBAND_WEBHOOK
             sample_window_seconds: 60
             max_per_window: 1
 `)
-	l := config.New(dir, 5*time.Second, 60*time.Second)
-	l.Start(t.Context(), time.Hour)
-	reg := l.Get()
-
-	cfg, ok := reg["ROUTED"]
-	if !ok {
-		t.Fatal("expected ROUTED in registry")
+	evCfg := reg["OV"].Events["helix.error"]
+	if len(evCfg.Overrides) != 1 {
+		t.Fatalf("expected 1 override, got %d", len(evCfg.Overrides))
 	}
-	evCfg := cfg.Events["helix.error"]
-
-	if len(evCfg.Messaging) != 1 || evCfg.Messaging[0].Channel != "#general-alerts" {
-		t.Fatalf("expected default messaging on #general-alerts, got %+v", evCfg.Messaging)
+	ov := evCfg.Overrides[0]
+	if ov.Operation != "convert-data-to-hdf5" || ov.Stage != "" {
+		t.Errorf("unexpected match: operation=%q stage=%q", ov.Operation, ov.Stage)
 	}
-	if len(evCfg.Routes) != 1 {
-		t.Fatalf("expected 1 route, got %d", len(evCfg.Routes))
+	if len(ov.Messaging) != 1 || ov.Messaging[0].Destination != "https://hooks.slack.com/baseband" {
+		t.Errorf("expected the override's own slack block, got %+v", ov.Messaging)
 	}
-	route := evCfg.Routes[0]
-	if route.Stage != "hdf5-conversion" {
-		t.Errorf("expected route.Stage=hdf5-conversion, got %q", route.Stage)
+	if len(ov.SCM) != 1 || ov.SCM[0].Repo != "org/troubleshooting" {
+		t.Errorf("expected github inherited from the event, got %+v", ov.SCM)
 	}
-	if len(route.Messaging) != 1 {
-		t.Fatalf("expected 1 messaging call on route, got %d", len(route.Messaging))
-	}
-	mc := route.Messaging[0]
-	if mc.Channel != "#baseband-alerts" {
-		t.Errorf("expected route channel #baseband-alerts, got %q", mc.Channel)
-	}
-	if mc.Destination != "https://hooks.slack.com/baseband" {
-		t.Errorf("expected route's own webhook override, got %q", mc.Destination)
+	if _, _, pb := reg["OV"].Events["helix.error"].Resolve("convert-data-to-hdf5", ""); pb.URL != "https://wiki.example/Errors" {
+		t.Errorf("expected the event's playbook inherited, got %+v", pb)
 	}
 }
 
-func TestLoadFile_RouteMissingStage(t *testing.T) {
-	dir := t.TempDir()
-	t.Setenv("NOSTAGE_WEBHOOK", "https://hooks.slack.com/test")
-	writeYAML(t, dir, "test.yml", `
-instrument_id: NOSTAGE
-notifications:
-  slack_webhook_env: NOSTAGE_WEBHOOK
-  events:
-    helix.error:
-      slack:
-        channel: "#alerts"
-        sample_window_seconds: 60
-        max_per_window: 1
-      routes:
-        - slack:
-            channel: "#other"
-            sample_window_seconds: 60
-            max_per_window: 1
+func TestLoadFile_OverrideOffTurnsDestinationOff(t *testing.T) {
+	overrideTestEnv(t)
+	reg := load(t, eventBlock+`
+      overrides:
+        - match: { operation: ml-plotter }
+          slack: off
+          github: off
+          playbook: https://github.com/org/runbooks/blob/main/ml-plotter.md
 `)
-	l := config.New(dir, 5*time.Second, 60*time.Second)
-	l.Start(t.Context(), time.Hour)
-	reg := l.Get()
-	if _, ok := reg["NOSTAGE"]; ok {
-		t.Error("expected NOSTAGE absent from registry due to route missing match.stage")
+	ov := reg["OV"].Events["helix.error"].Overrides[0]
+	if len(ov.Messaging) != 0 || len(ov.SCM) != 0 {
+		t.Errorf("expected slack and github off, got messaging=%+v scm=%+v", ov.Messaging, ov.SCM)
+	}
+	if ov.Playbook != "https://github.com/org/runbooks/blob/main/ml-plotter.md" {
+		t.Errorf("expected the override's playbook, got %q", ov.Playbook)
 	}
 }
 
-func TestLoadFile_RouteReusesSlackValidation(t *testing.T) {
-	dir := t.TempDir()
-	t.Setenv("BADROUTE_WEBHOOK", "https://hooks.slack.com/test")
-	writeYAML(t, dir, "test.yml", `
-instrument_id: BADROUTE
-notifications:
-  slack_webhook_env: BADROUTE_WEBHOOK
-  events:
-    helix.error:
-      slack:
-        channel: "#alerts"
-        sample_window_seconds: 60
-        max_per_window: 1
-      routes:
-        - match:
-            stage: some-stage
+func TestLoadFile_OverrideKeepsStageFilter(t *testing.T) {
+	overrideTestEnv(t)
+	reg := load(t, eventBlock+`
+      overrides:
+        - match: { operation: baseband-callback, stage: request-to-kko-coco }
+          playbook: https://wiki.example/kko
+`)
+	ov := reg["OV"].Events["helix.error"].Overrides[0]
+	if ov.Operation != "baseband-callback" || ov.Stage != "request-to-kko-coco" {
+		t.Errorf("unexpected match: operation=%q stage=%q", ov.Operation, ov.Stage)
+	}
+}
+
+func TestLoadFile_OverrideRejected(t *testing.T) {
+	cases := map[string]string{
+		"stage without operation": `
+        - match: { stage: request-to-kko-coco }
+          playbook: https://wiki.example/kko
+`,
+		"no match": `
+        - playbook: https://wiki.example/kko
+`,
+		"sets nothing": `
+        - match: { operation: ml-plotter }
+`,
+		"invalid slack block": `
+        - match: { operation: ml-plotter }
           slack:
             channel: missing-hash-prefix
             sample_window_seconds: 60
             max_per_window: 1
+`,
+		"scalar other than off": `
+        - match: { operation: ml-plotter }
+          github: on
+`,
+	}
+	for name, overrides := range cases {
+		t.Run(name, func(t *testing.T) {
+			overrideTestEnv(t)
+			reg := load(t, eventBlock+"      overrides:\n"+overrides)
+			if _, ok := reg["OV"]; ok {
+				t.Error("expected the instrument config to be rejected")
+			}
+		})
+	}
+}
+
+func TestLoadFile_PlaybookFallsBackToNotificationsLevel(t *testing.T) {
+	overrideTestEnv(t)
+	reg := load(t, `
+instrument_id: OV
+notifications:
+  slack_webhook_env: OV_DEFAULT_WEBHOOK
+  playbook: https://wiki.example/Playbook
+  events:
+    helix.error:
+      slack:
+        channel: "#alerts"
+        sample_window_seconds: 60
+        max_per_window: 1
 `)
-	l := config.New(dir, 5*time.Second, 60*time.Second)
-	l.Start(t.Context(), time.Hour)
-	reg := l.Get()
-	if _, ok := reg["BADROUTE"]; ok {
-		t.Error("expected BADROUTE absent from registry — route's channel reused the same # validation as the top-level event")
+	if got := reg["OV"].Events["helix.error"].Playbook; got != "https://wiki.example/Playbook" {
+		t.Errorf("expected notifications.playbook, got %q", got)
+	}
+}
+
+func TestLoadFile_InvalidPlaybookDroppedConfigStillLoads(t *testing.T) {
+	overrideTestEnv(t)
+	reg := load(t, `
+instrument_id: OV
+notifications:
+  slack_webhook_env: OV_DEFAULT_WEBHOOK
+  playbook: https://wiki.example/Playbook
+  events:
+    helix.error:
+      playbook: wiki.example/no-scheme
+      slack:
+        channel: "#alerts"
+        sample_window_seconds: 60
+        max_per_window: 1
+`)
+	cfg, ok := reg["OV"]
+	if !ok {
+		t.Fatal("an invalid playbook must not reject the config")
+	}
+	if got := cfg.Events["helix.error"].Playbook; got != "https://wiki.example/Playbook" {
+		t.Errorf("expected the invalid playbook dropped in favour of the default, got %q", got)
+	}
+}
+
+func TestLoadFile_RoutesIgnored(t *testing.T) {
+	overrideTestEnv(t)
+	reg := load(t, eventBlock+`
+      routes:
+        - match: { stage: hdf5-conversion }
+          slack: { channel: "#baseband-alerts", sample_window_seconds: 60, max_per_window: 1 }
+`)
+	evCfg, ok := reg["OV"].Events["helix.error"]
+	if !ok {
+		t.Fatal("a leftover routes key must not reject the config")
+	}
+	if len(evCfg.Overrides) != 0 {
+		t.Errorf("expected routes ignored, got %d overrides", len(evCfg.Overrides))
+	}
+}
+
+func TestResolve_FirstMatchingOverrideWins(t *testing.T) {
+	ev := config.EventConfig{
+		Messaging: []config.MessagingCall{{Channel: "#default"}},
+		Playbook:  "https://wiki.example/default",
+		Overrides: []config.Override{
+			{Operation: "baseband-callback", Stage: "request-to-kko-coco", Playbook: "https://wiki.example/kko"},
+			{Operation: "baseband-callback", Playbook: "https://wiki.example/callback"},
+		},
+	}
+	cases := []struct{ operation, stage, want string }{
+		{"baseband-callback", "request-to-kko-coco", "https://wiki.example/kko"},
+		{"baseband-callback", "request-to-gbo-coco", "https://wiki.example/callback"},
+		{"baseband-callback", "", "https://wiki.example/callback"},
+		{"replicate", "request-to-kko-coco", "https://wiki.example/default"},
+		{"Baseband-Callback", "", "https://wiki.example/default"},
+	}
+	for _, c := range cases {
+		messaging, _, playbook := ev.Resolve(c.operation, c.stage)
+		if playbook.URL != c.want || playbook.Generated {
+			t.Errorf("Resolve(%q, %q) playbook = %+v, want %q", c.operation, c.stage, playbook, c.want)
+		}
+		if c.want == "https://wiki.example/default" && (len(messaging) != 1 || messaging[0].Channel != "#default") {
+			t.Errorf("Resolve(%q, %q): expected the event's own messaging", c.operation, c.stage)
+		}
+	}
+}
+
+func TestResolve_PlaybookBase(t *testing.T) {
+	overrideTestEnv(t)
+	reg := load(t, `
+instrument_id: OV
+notifications:
+  slack_webhook_env: OV_DEFAULT_WEBHOOK
+  playbook: https://wiki.example/Playbook
+  playbook_base: https://github.com/org/troubleshooting/tree/main/runbooks/
+  events:
+    helix.error:
+      playbook: https://wiki.example/Errors
+      slack:
+        channel: "#alerts"
+        sample_window_seconds: 60
+        max_per_window: 1
+      overrides:
+        - match: { operation: alert-outriggers }
+          playbook: https://wiki.example/Outriggers
+        - match: { operation: ml-plotter }
+          github: off
+`)
+	ev := reg["OV"].Events["helix.error"]
+	cases := []struct {
+		operation string
+		want      config.Playbook
+	}{
+		// trailing slash on the base is trimmed
+		{"replicate", config.Playbook{URL: "https://github.com/org/troubleshooting/tree/main/runbooks/replicate", Generated: true}},
+		// an override's own playbook wins over the base
+		{"alert-outriggers", config.Playbook{URL: "https://wiki.example/Outriggers"}},
+		// an override without a playbook still gets the base link
+		{"ml-plotter", config.Playbook{URL: "https://github.com/org/troubleshooting/tree/main/runbooks/ml-plotter", Generated: true}},
+		// unusual characters are path-escaped rather than creating new path segments
+		{"a/b c", config.Playbook{URL: "https://github.com/org/troubleshooting/tree/main/runbooks/a%2Fb%20c", Generated: true}},
+		// no operation: nothing to build a link from
+		{"", config.Playbook{URL: "https://wiki.example/Errors"}},
+	}
+	for _, c := range cases {
+		if _, _, got := ev.Resolve(c.operation, ""); got != c.want {
+			t.Errorf("Resolve(%q) = %+v, want %+v", c.operation, got, c.want)
+		}
 	}
 }

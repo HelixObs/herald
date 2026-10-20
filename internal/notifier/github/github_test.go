@@ -376,3 +376,70 @@ func TestBuildBody_ContainsSummary(t *testing.T) {
 		t.Error("expected body to contain previous entity ID")
 	}
 }
+
+// bodyOnRecurrence dispatches p as a recurrence of open issue #42 and returns
+// the issue body the backend wrote.
+func bodyOnRecurrence(t *testing.T, p notifier.SCMParams) string {
+	t.Helper()
+	issue := &issueState{number: 42, state: "open"}
+	srv := newGitHubMock(t, issue)
+	fdb := &fakeDB{record: &db.NotificationIssue{GithubIssueNumber: 42, EntityCount: 1, FirstSeenAt: time.Now()}}
+	c := ghbackend.NewWithBaseURL(fdb, srv.URL+"/api/v3/")
+	if _, err := c.Dispatch(context.Background(), p); err != nil {
+		t.Fatalf("Dispatch: %v", err)
+	}
+	return issue.body
+}
+
+func TestBuildBody_Playbook(t *testing.T) {
+	const hint = "If this link is a 404"
+	cases := []struct {
+		name     string
+		url      string
+		fromBase bool
+		want     []string
+		notWant  []string
+	}{
+		{
+			name:     "built from playbook_base",
+			url:      "https://github.com/org/troubleshooting/tree/main/runbooks/replicate",
+			fromBase: true,
+			want: []string{
+				"📖 **Playbook:** [replicate](https://github.com/org/troubleshooting/tree/main/runbooks/replicate)",
+				hint + ", there's no playbook for `replicate` yet. Ask the owner of `replicate` to add one.",
+			},
+		},
+		{
+			name:    "configured explicitly",
+			url:     "https://wiki.example/Replication",
+			want:    []string{"📖 **Playbook:** [Playbook](https://wiki.example/Replication)"},
+			notWant: []string{hint},
+		},
+		{
+			name:    "none configured",
+			want:    []string{"📖 **Playbook:** none configured for CHIME."},
+			notWant: []string{hint},
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			p := baseParams()
+			p.Operation = "replicate"
+			p.PlaybookURL, p.PlaybookFromBase = c.url, c.fromBase
+			body := bodyOnRecurrence(t, p)
+			if !strings.Contains(body, "**Operation:** replicate\n") {
+				t.Errorf("expected Operation line, got:\n%s", body)
+			}
+			for _, w := range c.want {
+				if !strings.Contains(body, w) {
+					t.Errorf("expected body to contain %q, got:\n%s", w, body)
+				}
+			}
+			for _, w := range c.notWant {
+				if strings.Contains(body, w) {
+					t.Errorf("expected body not to contain %q, got:\n%s", w, body)
+				}
+			}
+		})
+	}
+}

@@ -303,3 +303,53 @@ func TestSend_NoOperationOmitsField(t *testing.T) {
 		t.Errorf("expected no Operation field when unset, got:\n%s", string(body))
 	}
 }
+
+// sentBlocks sends m and returns the Block Kit JSON posted to the webhook.
+func sentBlocks(t *testing.T, m notifier.Message) string {
+	t.Helper()
+	var body []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		buf := make([]byte, r.ContentLength)
+		r.Body.Read(buf) //nolint:errcheck
+		body = buf
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+	slack.New().Send(context.Background(), srv.URL, "deadbeef", m, 60, 5) //nolint:errcheck
+	return string(body)
+}
+
+func TestSend_PlaybookButtonFollowsInspectEntity(t *testing.T) {
+	m := msg("replication failed")
+	m.Operation = "replicate"
+	m.PlaybookURL = "https://wiki.example/Replication"
+	body := sentBlocks(t, m)
+
+	inspect := strings.Index(body, "Inspect Entity")
+	playbook := strings.Index(body, ":book: Playbook\"")
+	dash := strings.Index(body, "Error Dashboard")
+	if inspect < 0 || playbook < 0 || dash < 0 || !(inspect < playbook && playbook < dash) {
+		t.Errorf("expected buttons Inspect Entity, Playbook, Error Dashboard in order, got:\n%s", body)
+	}
+	if strings.Contains(body, "a 404?") {
+		t.Errorf("expected no 404 hint for an explicitly configured playbook, got:\n%s", body)
+	}
+}
+
+func TestSend_PlaybookFromBaseAddsHint(t *testing.T) {
+	m := msg("replication failed")
+	m.Operation = "replicate"
+	m.PlaybookURL = "https://github.com/org/troubleshooting/tree/main/runbooks/replicate"
+	m.PlaybookFromBase = true
+	body := sentBlocks(t, m)
+	if !strings.Contains(body, "Playbook a 404? Ask the owner of `replicate` to add one") {
+		t.Errorf("expected 404 hint in context, got:\n%s", body)
+	}
+}
+
+func TestSend_NoPlaybookNoButton(t *testing.T) {
+	body := sentBlocks(t, msg("hello"))
+	if strings.Contains(body, "Playbook") {
+		t.Errorf("expected no Playbook button or hint without a playbook, got:\n%s", body)
+	}
+}

@@ -131,6 +131,7 @@ func buildDigestBlockKit(suppressed, windowSecs int, fp string, last notifier.Me
 			"url":  last.ErrDashURL,
 		},
 	}
+	elements = insertPlaybookButton(elements, last.PlaybookURL)
 	if last.NotificationsURL != "" {
 		elements = append(elements, map[string]any{
 			"type": "button",
@@ -140,6 +141,7 @@ func buildDigestBlockKit(suppressed, windowSecs int, fp string, last notifier.Me
 	}
 
 	var ctxParts []string
+	ctxParts = appendPlaybookHint(ctxParts, last)
 	ctxParts = append(ctxParts, fmt.Sprintf("Fingerprint: `%s`", fpShort))
 	ctxParts = append(ctxParts, "HelixObs")
 
@@ -181,7 +183,7 @@ func (c *Client) sendBlocks(ctx context.Context, webhookURL, fingerprint string,
 //   - Header: ":rotating_light: [INST] event.name"
 //   - Section: bold error body + stage/metadata fields inline
 //   - Fields: Entity ID + Instrument (+ Operation, if known)
-//   - Actions: Inspect Entity (primary), Error Dashboard
+//   - Actions: Inspect Entity (primary), Playbook (if configured), Error Dashboard
 //   - Context: GitHub issue link(s) + fingerprint short + HelixObs tag
 func buildBlockKit(fp string, msg notifier.Message) []byte {
 	header := fmt.Sprintf(":rotating_light:  [%s] %s", msg.InstrumentID, msg.EventName)
@@ -220,6 +222,7 @@ func buildBlockKit(fp string, msg notifier.Message) []byte {
 	if len(fp) > 8 {
 		fpShort = fp[:8]
 	}
+	ctxParts = appendPlaybookHint(ctxParts, msg)
 	ctxParts = append(ctxParts, fmt.Sprintf("Fingerprint: `%s`", fpShort))
 	ctxParts = append(ctxParts, "HelixObs")
 
@@ -244,6 +247,7 @@ func buildBlockKit(fp string, msg notifier.Message) []byte {
 			"url":  msg.ErrDashURL,
 		},
 	}
+	actionElements = insertPlaybookButton(actionElements, msg.PlaybookURL)
 	if msg.NotificationsURL != "" {
 		actionElements = append(actionElements, map[string]any{
 			"type": "button",
@@ -279,6 +283,32 @@ func buildBlockKit(fp string, msg notifier.Message) []byte {
 
 	payload, _ := json.Marshal(map[string]any{"blocks": blocks})
 	return payload
+}
+
+// insertPlaybookButton puts a Playbook button right after the first button
+// (Inspect Entity). No button when no playbook is configured: a nudge on
+// every alert would be noise.
+func insertPlaybookButton(elements []any, playbookURL string) []any {
+	if playbookURL == "" || len(elements) == 0 {
+		return elements
+	}
+	btn := map[string]any{
+		"type": "button",
+		"text": map[string]any{"type": "plain_text", "text": ":book: Playbook", "emoji": true},
+		"url":  playbookURL,
+	}
+	out := make([]any, 0, len(elements)+1)
+	out = append(out, elements[0], btn)
+	return append(out, elements[1:]...)
+}
+
+// appendPlaybookHint adds a note for playbook links built from playbook_base,
+// whose page may not exist yet.
+func appendPlaybookHint(ctxParts []string, msg notifier.Message) []string {
+	if msg.PlaybookURL == "" || !msg.PlaybookFromBase {
+		return ctxParts
+	}
+	return append(ctxParts, fmt.Sprintf(":book: Playbook a 404? Ask the owner of `%s` to add one", msg.Operation))
 }
 
 // escMrkdwn escapes characters that Slack mrkdwn treats as special.

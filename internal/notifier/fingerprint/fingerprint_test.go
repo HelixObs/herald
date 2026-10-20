@@ -65,39 +65,57 @@ func TestNormalise(t *testing.T) {
 }
 
 func TestComputeStability(t *testing.T) {
-	fp1 := fingerprint.Compute("CHIME", "helix.error", "disk full on node 3", "hdf5_archiver")
-	fp2 := fingerprint.Compute("CHIME", "helix.error", "disk full on node 7", "hdf5_archiver")
+	fp1 := fingerprint.Compute("CHIME", "helix.error", "disk full on node 3", "write-header", "hdf5_archiver")
+	fp2 := fingerprint.Compute("CHIME", "helix.error", "disk full on node 7", "write-header", "hdf5_archiver")
 	if fp1 != fp2 {
 		t.Errorf("expected same fingerprint for same error class, got %q and %q", fp1, fp2)
 	}
 }
 
 func TestComputeDifferentInstruments(t *testing.T) {
-	fp1 := fingerprint.Compute("CHIME", "helix.error", "disk full", "")
-	fp2 := fingerprint.Compute("VLA", "helix.error", "disk full", "")
+	fp1 := fingerprint.Compute("CHIME", "helix.error", "disk full", "write-header", "")
+	fp2 := fingerprint.Compute("VLA", "helix.error", "disk full", "write-header", "")
 	if fp1 == fp2 {
 		t.Errorf("expected different fingerprints for different instruments")
 	}
 }
 
 func TestComputeDifferentEvents(t *testing.T) {
-	fp1 := fingerprint.Compute("CHIME", "helix.error", "disk full", "")
-	fp2 := fingerprint.Compute("CHIME", "helix.warning", "disk full", "")
+	fp1 := fingerprint.Compute("CHIME", "helix.error", "disk full", "write-header", "")
+	fp2 := fingerprint.Compute("CHIME", "helix.warning", "disk full", "write-header", "")
 	if fp1 == fp2 {
 		t.Errorf("expected different fingerprints for different event types")
 	}
 }
 
 func TestComputeDifferentStages(t *testing.T) {
-	fp1 := fingerprint.Compute("CHIME", "helix.error", "disk full", "stage_a")
-	fp2 := fingerprint.Compute("CHIME", "helix.error", "disk full", "stage_b")
+	fp1 := fingerprint.Compute("CHIME", "helix.error", "disk full", "write-header", "stage_a")
+	fp2 := fingerprint.Compute("CHIME", "helix.error", "disk full", "write-header", "stage_b")
 	if fp1 == fp2 {
 		t.Errorf("expected different fingerprints for different stages")
 	}
 }
 
+func TestComputeDifferentOperations(t *testing.T) {
+	fp1 := fingerprint.Compute("CHIME", "helix.error", "list index out of range", "client-side-registration", "")
+	fp2 := fingerprint.Compute("CHIME", "helix.error", "list index out of range", "complete-localization", "")
+	if fp1 == fp2 {
+		t.Errorf("expected different fingerprints for the same message from different operations")
+	}
+}
+
+// Operation and stage are separate fields: moving a value from one to the
+// other must not produce the same fingerprint.
+func TestComputeOperationAndStageNotInterchangeable(t *testing.T) {
+	fp1 := fingerprint.Compute("CHIME", "helix.error", "disk full", "write-header", "")
+	fp2 := fingerprint.Compute("CHIME", "helix.error", "disk full", "", "write-header")
+	if fp1 == fp2 {
+		t.Errorf("expected operation and stage to hash differently")
+	}
+}
+
 func TestComputeLength(t *testing.T) {
-	fp := fingerprint.Compute("CHIME", "helix.error", "disk full", "hdf5_archiver")
+	fp := fingerprint.Compute("CHIME", "helix.error", "disk full", "write-header", "hdf5_archiver")
 	if len(fp) != 16 {
 		t.Errorf("expected 16-char hex fingerprint, got %d chars: %q", len(fp), fp)
 	}

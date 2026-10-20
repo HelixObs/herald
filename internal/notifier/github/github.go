@@ -158,10 +158,22 @@ func buildBody(p notifier.SCMParams, occurrences int, firstSeen, lastSeen time.T
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "## Error summary\n")
 	fmt.Fprintf(&sb, "**Message:** %s\n", p.Message)
+	if p.Operation != "" {
+		fmt.Fprintf(&sb, "**Operation:** %s\n", p.Operation)
+	}
 	if p.Stage != "" {
 		fmt.Fprintf(&sb, "**Stage:** %s\n", p.Stage)
 	}
 	fmt.Fprintf(&sb, "**Instrument:** %s\n**Event type:** %s\n\n", p.InstrumentID, p.EventName)
+	switch {
+	case p.PlaybookURL != "" && p.PlaybookFromBase:
+		fmt.Fprintf(&sb, "📖 **Playbook:** [%s](%s)\n", p.Operation, p.PlaybookURL)
+		fmt.Fprintf(&sb, "If this link is a 404, there's no playbook for `%s` yet. Ask the owner of `%s` to add one.\n\n", p.Operation, p.Operation)
+	case p.PlaybookURL != "":
+		fmt.Fprintf(&sb, "📖 **Playbook:** [Playbook](%s)\n\n", p.PlaybookURL)
+	default:
+		fmt.Fprintf(&sb, "📖 **Playbook:** none configured for %s. Add `playbook:` under `notifications` in the instrument config so the next person has somewhere to start.\n\n", p.InstrumentID)
+	}
 
 	fmt.Fprintf(&sb, "## Occurrence statistics\n| | |\n|---|---|\n")
 	fmt.Fprintf(&sb, "| **First seen** | %s |\n", fs)

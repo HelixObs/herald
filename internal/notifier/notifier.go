@@ -28,6 +28,11 @@ import (
 // maxConcurrentDispatches caps concurrent outbound goroutines per backend type.
 const maxConcurrentDispatches = 20
 
+// staleOverrideAfter is how long an override's operation can go without an
+// event before the herald warns that the override may be stale -- typically
+// because the operation was renamed in pipeline code.
+const staleOverrideAfter = 7 * 24 * time.Hour
+
 // Event is sent by the interceptor for every helix.* span event.
 type Event struct {
 	InstrumentID string
@@ -54,6 +59,10 @@ type Notifier struct {
 	sem            map[string]chan struct{} // per "type" and "type_scm"
 	digestInterval time.Duration
 	fpLocks        sync.Map // fingerprint → *sync.Mutex; serialises concurrent createIssue for same fp
+
+	startedAt   time.Time
+	opSeen      sync.Map        // instrument|operation → time.Time of the last event
+	staleWarned map[string]bool // instrument|operation already warned; only touched by Start's goroutine
 }
 
 // New creates a Notifier. Backends must be registered via RegisterMessaging / RegisterSCM
@@ -76,6 +85,8 @@ func New(
 		grafana:        strings.TrimRight(grafanaURL, "/"),
 		sem:            make(map[string]chan struct{}),
 		digestInterval: 30 * time.Second,
+		startedAt:      time.Now(),
+		staleWarned:    make(map[string]bool),
 	}
 }
 
@@ -111,6 +122,8 @@ func (n *Notifier) Send(e Event) {
 func (n *Notifier) Start(ctx context.Context) {
 	digestTicker := time.NewTicker(n.digestInterval)
 	defer digestTicker.Stop()
+	staleTicker := time.NewTicker(time.Hour)
+	defer staleTicker.Stop()
 
 	for {
 		select {
@@ -118,6 +131,8 @@ func (n *Notifier) Start(ctx context.Context) {
 			go n.dispatch(ctx, e) // goroutine so the loop never blocks on slow API calls
 		case <-digestTicker.C:
 			n.flushDigests(ctx)
+		case now := <-staleTicker.C:
+			n.warnStaleOverrides(now)
 		case <-ctx.Done():
 			return
 		}
@@ -136,22 +151,14 @@ func (n *Notifier) dispatch(ctx context.Context, e Event) {
 		return
 	}
 
-	// A Stage-matched route overrides where this event goes entirely (not
-	// additively) -- first match wins. Falls back to the event's own default
-	// Messaging/SCM if Stage is empty or matches no route; populating Stage
-	// correctly is on whatever emits the event, not something to work around
-	// here (e.g. via fuzzy matching).
-	messaging, scm := evCfg.Messaging, evCfg.SCM
-	if e.Stage != "" {
-		for _, r := range evCfg.Routes {
-			if r.Stage == e.Stage {
-				messaging, scm = r.Messaging, r.SCM
-				break
-			}
-		}
-	}
+	n.seenOperation(e.InstrumentID, e.Operation)
 
-	fp := fingerprint.Compute(e.InstrumentID, e.EventName, e.Message, e.Stage)
+	// The first override matching the operation (and stage, if it sets one)
+	// supplies messaging, SCM and playbook; anything it left unset was
+	// already inherited from the event at config load.
+	messaging, scm, playbook := evCfg.Resolve(e.Operation, e.Stage)
+
+	fp := fingerprint.Compute(e.InstrumentID, e.EventName, e.Message, e.Operation, e.Stage)
 
 	if n.silence.IsSilenced(ctx, e.InstrumentID, e.EventName, fp) {
 		n.metrics.NotificationsSuppressedTotal.WithLabelValues(e.InstrumentID, "silence", e.EventName).Inc()
@@ -192,7 +199,7 @@ func (n *Notifier) dispatch(ctx context.Context, e Event) {
 			go func() {
 				defer func() { <-sem }()
 				defer wg.Done()
-				if u := n.doSCM(ctx, e, sc, backend, fp, inspectorURL, notificationsURL); u != "" {
+				if u := n.doSCM(ctx, e, sc, backend, fp, inspectorURL, notificationsURL, playbook); u != "" {
 					urlMu.Lock()
 					issueURLs = append(issueURLs, u)
 					urlMu.Unlock()
@@ -219,7 +226,7 @@ func (n *Notifier) dispatch(ctx context.Context, e Event) {
 		case sem <- struct{}{}:
 			go func() {
 				defer func() { <-sem }()
-				n.doMessaging(ctx, e, mc, backend, fp, grafanaInspectorURL, errEntitiesURL, notificationsURL, issueURLs)
+				n.doMessaging(ctx, e, mc, backend, fp, grafanaInspectorURL, errEntitiesURL, notificationsURL, playbook, issueURLs)
 			}()
 		default:
 			n.metrics.NotificationChannelDropsTotal.Inc()
@@ -230,9 +237,10 @@ func (n *Notifier) dispatch(ctx context.Context, e Event) {
 }
 
 func (n *Notifier) doMessaging(ctx context.Context, e Event, mc config.MessagingCall,
-	backend MessagingBackend, fp, inspectorURL, errEntitiesURL, notificationsURL string, issueURLs []string) {
+	backend MessagingBackend, fp, inspectorURL, errEntitiesURL, notificationsURL string, playbook config.Playbook, issueURLs []string) {
 
 	msg := n.buildMsg(e, mc.MessageTemplate, inspectorURL, errEntitiesURL, notificationsURL, issueURLs)
+	msg.PlaybookURL, msg.PlaybookFromBase = playbook.URL, playbook.Generated
 
 	start := time.Now()
 	sent, err := backend.Send(ctx, mc.Destination, fp, msg, mc.SampleWindowSeconds, mc.MaxPerWindow)
@@ -251,6 +259,41 @@ func (n *Notifier) doMessaging(ctx context.Context, e Event, mc config.Messaging
 	}
 }
 
+func (n *Notifier) seenOperation(instrumentID, operation string) {
+	if operation != "" {
+		n.opSeen.Store(instrumentID+"|"+operation, time.Now())
+	}
+}
+
+// warnStaleOverrides logs a warning, once, for each configured override whose
+// operation hasn't produced an event in staleOverrideAfter (counting from
+// herald start). It warns again only if the operation recovers and then goes
+// quiet again.
+func (n *Notifier) warnStaleOverrides(now time.Time) {
+	for instrumentID, instCfg := range n.cfg.Get() {
+		for eventName, evCfg := range instCfg.Events {
+			for _, o := range evCfg.Overrides {
+				key := instrumentID + "|" + o.Operation
+				last := n.startedAt
+				if v, ok := n.opSeen.Load(key); ok {
+					last = v.(time.Time)
+				}
+				if now.Sub(last) < staleOverrideAfter {
+					delete(n.staleWarned, key)
+					continue
+				}
+				if n.staleWarned[key] {
+					continue
+				}
+				n.staleWarned[key] = true
+				slog.Warn("notifier: override matches an operation with no events in 7 days; was it renamed?",
+					"instrument", instrumentID, "event", eventName, "operation", o.Operation,
+					"last_seen", last.UTC().Format(time.RFC3339))
+			}
+		}
+	}
+}
+
 func (n *Notifier) fpLock(fp string) *sync.Mutex {
 	v, _ := n.fpLocks.LoadOrStore(fp, &sync.Mutex{})
 	return v.(*sync.Mutex)
@@ -258,7 +301,7 @@ func (n *Notifier) fpLock(fp string) *sync.Mutex {
 
 // doSCM dispatches to one SCM backend and returns the resulting issue URL (empty on error).
 func (n *Notifier) doSCM(ctx context.Context, e Event, sc config.SCMCall,
-	backend SCMBackend, fp, inspectorURL, notificationsURL string) string {
+	backend SCMBackend, fp, inspectorURL, notificationsURL string, playbook config.Playbook) string {
 
 	// Serialise concurrent dispatches for the same fingerprint. Without this, a burst
 	// of N events with identical messages (e.g. queued spans flushed after reconnect)
@@ -269,8 +312,8 @@ func (n *Notifier) doSCM(ctx context.Context, e Event, sc config.SCMCall,
 	defer mu.Unlock()
 
 	title := fmt.Sprintf("[%s] %s", e.InstrumentID, truncate(e.Message, 80))
-	if e.Stage != "" {
-		title = fmt.Sprintf("[%s] %s (stage: %s)", e.InstrumentID, truncate(e.Message, 60), e.Stage)
+	if e.Operation != "" {
+		title = fmt.Sprintf("[%s] %s (%s)", e.InstrumentID, truncate(e.Message, 60), e.Operation)
 	}
 
 	start := time.Now()
@@ -284,7 +327,10 @@ func (n *Notifier) doSCM(ctx context.Context, e Event, sc config.SCMCall,
 		InspectorBase:    fmt.Sprintf("%s/entity", n.uiBase),
 		EventName:        e.EventName,
 		Message:          e.Message,
+		Operation:        e.Operation,
 		Stage:            e.Stage,
+		PlaybookURL:      playbook.URL,
+		PlaybookFromBase: playbook.Generated,
 		Timestamp:        time.Unix(0, e.TimestampNs),
 		Fingerprint:      fp,
 		InstrumentID:     e.InstrumentID,
@@ -308,8 +354,8 @@ func (n *Notifier) flushDigests(ctx context.Context) {
 	for _, instCfg := range reg {
 		for _, evCfg := range instCfg.Events {
 			n.flushMessaging(ctx, evCfg.Messaging)
-			for _, r := range evCfg.Routes {
-				n.flushMessaging(ctx, r.Messaging)
+			for _, o := range evCfg.Overrides {
+				n.flushMessaging(ctx, o.Messaging)
 			}
 		}
 	}

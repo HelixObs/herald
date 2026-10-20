@@ -8,13 +8,15 @@ import (
 // Message is the platform-agnostic notification payload passed to MessagingBackend.Send.
 // Each backend renders it into its own format (Slack Block Kit, Discord embeds, etc.).
 type Message struct {
-	Text             string            // plain-text fallback used in digest summaries
+	Text             string // plain-text fallback used in digest summaries
 	InstrumentID     string
 	EventName        string
 	EntityID         string
-	Body             string            // human-readable error/event message
+	Body             string // human-readable error/event message
 	Stage            string
-	Operation        string            // name of the span that emitted this event
+	Operation        string // name of the span that emitted this event
+	PlaybookURL      string // resolved playbook link; empty when none is configured
+	PlaybookFromBase bool   // PlaybookURL was built from playbook_base, so the page may not exist yet
 	InspectorURL     string
 	ErrDashURL       string
 	NotificationsURL string            // deep-link to the Notifications page for this fingerprint
@@ -52,7 +54,10 @@ type SCMParams struct {
 	InspectorBase    string
 	EventName        string
 	Message          string
+	Operation        string // name of the span that emitted this event
 	Stage            string
+	PlaybookURL      string // resolved playbook link; empty when none is configured
+	PlaybookFromBase bool   // PlaybookURL was built from playbook_base, so the page may not exist yet
 	Timestamp        time.Time
 	Fingerprint      string
 	InstrumentID     string

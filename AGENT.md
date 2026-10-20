@@ -138,7 +138,8 @@ Two different "Inspect Entity" links are built in `dispatch()` (`internal/notifi
   readily available at render time.
 
 `notifier.Event.TraceID` (hex-encoded, set in `interceptor.go` from the erroring span's own
-`TraceId`) and `notifier.Event.Operation` (the span's `Name` — i.e. which operation failed) both
+`TraceId`) and `notifier.Event.Operation` (the span's `Name` — i.e. which operation failed; also
+what overrides match on and part of the fingerprint) both
 flow from the interceptor into `notifier.Message`, and `Operation` is rendered as a Slack Block
 Kit field alongside Entity ID / Instrument.
 
@@ -149,10 +150,13 @@ instrument_id: CHIME
 notifications:
   slack_webhook_env: CHIMEFRB_SLACK_WEBHOOK   # env var → webhook URL (instrument default)
   github_token_env:  CHIMEFRB_GITHUB_TOKEN    # env var → PAT
+  playbook_base: https://github.com/org/troubleshooting/tree/main/runbooks  # → <base>/<operation>
+  playbook: https://wiki.example/Playbook     # optional fallback when playbook_base is unset
 
   events:
     helix.error:
       message_template: "{{.field}}"          # optional Go template over event Metadata
+      playbook: https://wiki.example/Errors   # optional; used when playbook_base is unset
       slack:
         channel: "#chime-frb-alerts"
         webhook_env: OVERRIDE_WEBHOOK         # optional per-event override
@@ -163,22 +167,45 @@ notifications:
         labels: [helixobs, bug]
         on_recurrence_after_close: reopen     # or "new_issue"
 
-      # Optional: route this event to a different channel/webhook per Stage
-      # (Event.Stage, populated from the emitting span event's "stage"
-      # metadata — see interceptor.go). Checked in order, first match wins.
-      # Falls back to the slack/github blocks above if Stage is empty or
-      # matches no route here — populating Stage correctly is on whatever
-      # emits the event, Herald does not try to work around a missing or
-      # misspelled value.
-      routes:
-        - match:
-            stage: hdf5-conversion
+      # Optional, checked in order, first match wins. match.operation (required)
+      # is compared exactly with Event.Operation, the emitting span's name;
+      # match.stage (optional) also requires Event.Stage, from the event's
+      # "stage" metadata. Unset slack/github/playbook are inherited from the
+      # event; `off` turns a destination off. Resolved at load time
+      # (config.EventConfig.Resolve).
+      overrides:
+        - match: { operation: convert-data-to-hdf5 }
           slack:
             channel: "#baseband-alerts"
             webhook_env: BASEBAND_SLACK_WEBHOOK
             sample_window_seconds: 600
             max_per_window: 1
+          github: off
+        - match: { operation: baseband-callback, stage: request-to-kko-coco }
+          playbook: https://wiki.example/kko
 ```
+
+Playbook resolution, most specific first: the matching override's `playbook`,
+`playbook_base/<operation>` (path-escaped; flagged `PlaybookFromBase` so Slack
+and GitHub add "if this is a 404, ask the owner of `<operation>` to add one"),
+the event's `playbook`, then `notifications.playbook`. Playbook URLs must be
+absolute http(s); invalid ones are dropped with a warning and the config still
+loads. Herald never fetches them.
+
+`routes:` (the old stage-only key) is ignored with a warning. Overrides whose
+operation sees no events for 7 days log a warning once
+(`Notifier.warnStaleOverrides`), since a renamed operation silently stops
+matching.
+
+### Fingerprint
+
+`fingerprint.Compute(instrument_id, event_name, message, operation, stage)`:
+the message is normalised first (IDs, numbers, paths stripped). `operation`
+keeps the same message from two operations as two error classes. The alerts
+list (`db.QueryAlerts`) recomputes fingerprints from `entity_event_dedup`,
+which stores `operation` (migration 016) for that reason. Any change here
+changes every fingerprint: existing `notification_issues` rows and
+fingerprint-scoped silences stop matching.
 
 Config files are hot-reloaded every `NOTIFIER_RELOAD_INTERVAL_SECS` seconds without a restart.
 Credentials are resolved from environment variables at load time — never stored in YAML.
