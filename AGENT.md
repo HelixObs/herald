@@ -64,6 +64,7 @@ migrations/
   003_trace_dedup.sql   operation_trace_seen dedup table
   004_sherlock_usage.sql    sherlock_usage cost ledger hypertable
   008_notifications.sql     notification_issues and notification_silences tables
+  017_trace_seen_retention.sql  keeps 30 days of operation_trace_seen (hourly TimescaleDB job)
 deploy/instruments/
   example-instrument.yml  Template; copy to <id>-context.yml and fill in your values
 ```
